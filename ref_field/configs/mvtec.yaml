@@ -1,0 +1,37 @@
+seed: 42
+work_dir: ./work_dirs/ref_field_mvtec
+
+data:
+  root: /path/to/mvtec_ad
+  image_size: 448
+  num_workers: 4
+  batch_size: 8
+
+model:
+  name: vit_small_patch14_dinov2.lvd142m
+  pretrained: true
+  freeze_encoder: true
+  proj_dim: 256
+  use_intra: true
+  use_external: true
+  use_context: true
+
+memory:
+  image_top_r: 8
+  patch_top_k: 5
+  intra_top_k: 5
+  intra_exclusion_radius: 1
+
+train:
+  epochs_context: 20
+  epochs_gate: 25
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  mask_ratio: 0.4
+  pseudo_mix_prob: 0.75
+  nuisance_views: 2
+  amp: true
+
+infer:
+  smoothing_sigma: 1.0
+  topk_ratio: 0.01
