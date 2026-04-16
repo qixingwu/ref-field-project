@@ -139,8 +139,10 @@ def main():
 
             if args.save_vis:
                 rgb = denormalize_image(image[0]).permute(1, 2, 0).cpu().numpy()
-                # Always pass the mask (empty for normal images)
-                out_path = vis_dir / (Path(batch["image_path"][0]).stem + ".png")
+                # Include subdirectory name in output filename to avoid overwriting
+                img_path = Path(batch["image_path"][0])
+                subfolder = img_path.parent.name  # e.g., "broken_large", "good", etc.
+                out_path = vis_dir / f"{subfolder}_{img_path.stem}.png"
                 save_overlay(rgb, score_np, out_path, gt_mask=mask)
 
     img_metrics = image_level_metrics(image_labels, image_scores)
