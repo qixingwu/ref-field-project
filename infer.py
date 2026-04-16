@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import List
 
@@ -138,12 +139,37 @@ def main():
 
             if args.save_vis:
                 rgb = denormalize_image(image[0]).permute(1, 2, 0).cpu().numpy()
+                # Always pass the mask (empty for normal images)
                 out_path = vis_dir / (Path(batch["image_path"][0]).stem + ".png")
-                save_overlay(rgb, score_np, out_path)
+                save_overlay(rgb, score_np, out_path, gt_mask=mask)
 
     img_metrics = image_level_metrics(image_labels, image_scores)
     px_metrics = pixel_level_metrics(pixel_masks, pixel_scores)
-    print({**img_metrics, **px_metrics})
+
+    # Combine all metrics
+    all_metrics = {**img_metrics, **px_metrics}
+
+    # Save metrics to JSON file
+    results_dir = Path(cfg["work_dir"]) / args.category
+    results_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = results_dir / "metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump(all_metrics, f, indent=4)
+
+    # Print metrics in a more readable format
+    print("\n" + "="*50)
+    print("Anomaly Detection Results")
+    print("="*50)
+    print(f"Image-level Metrics:")
+    print(f"  - ROC-AUC: {img_metrics['image_roc_auc']:.4f}")
+    print(f"  - AP:      {img_metrics['image_ap']:.4f}")
+    print(f"Pixel-level Metrics:")
+    print(f"  - ROC-AUC: {px_metrics['pixel_roc_auc']:.4f}")
+    print(f"  - AP:      {px_metrics['pixel_ap']:.4f}")
+    if 'pixel_pro' in px_metrics:
+        print(f"  - PRO:     {px_metrics['pixel_pro']:.4f}")
+    print("="*50 + "\n")
+    print(f"Metrics saved to: {metrics_path}")
 
 
 if __name__ == "__main__":

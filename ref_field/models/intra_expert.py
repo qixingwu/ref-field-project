@@ -32,12 +32,12 @@ class IntraExpert(nn.Module):
         B, N, D = z.shape
         sim = z @ z.transpose(1, 2)
         eye = torch.eye(N, device=z.device, dtype=torch.bool).unsqueeze(0)
-        sim = sim.masked_fill(eye, -1e9)
+        sim = sim.masked_fill(eye, -1e4)
 
         coords = self._coords(hp, wp, z.device)
         dist = torch.cdist(coords, coords)
         local_mask = (dist <= float(self.exclusion_radius)).unsqueeze(0)
-        sim = sim.masked_fill(local_mask, -1e9)
+        sim = sim.masked_fill(local_mask, -1e4)
 
         k = min(self.k, max(1, N - 1))
         topv, topi = torch.topk(sim, k=k, dim=-1)

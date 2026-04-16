@@ -2,10 +2,10 @@ seed: 42
 work_dir: ./work_dirs/ref_field_mvtec
 
 data:
-  root: /path/to/mvtec_ad
-  image_size: 448
+  root: /home/ubuntu/work/dataset/mvtec
+  image_size: 518
   num_workers: 4
-  batch_size: 8
+  batch_size: 2
 
 model:
   name: vit_small_patch14_dinov2.lvd142m
