@@ -8,6 +8,7 @@ from typing import Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import gaussian_filter
 
 
 def set_seed(seed: int) -> None:
@@ -34,21 +35,31 @@ def upsample_score_map(score_map: torch.Tensor, size: Tuple[int, int]) -> torch.
     return out.squeeze(1)
 
 
-def gaussian_blur(score_map: torch.Tensor, sigma: float = 1.0, kernel_size: int = 5) -> torch.Tensor:
+def gaussian_blur(score_map: torch.Tensor, sigma: float = 4.0) -> torch.Tensor:
+    """Apply Gaussian blur using scipy.ndimage for PatchCore-style smoothing.
+
+    Args:
+        score_map: [B, H, W] tensor
+        sigma: Standard deviation for Gaussian kernel (default 4.0 like PatchCore)
+
+    Returns:
+        Blurred score_map with same shape and device as input
+    """
     if sigma <= 0:
         return score_map
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    radius = kernel_size // 2
-    x = torch.arange(-radius, radius + 1, device=score_map.device, dtype=score_map.dtype)
-    kernel_1d = torch.exp(-(x ** 2) / (2 * sigma ** 2))
-    kernel_1d = kernel_1d / kernel_1d.sum()
-    kernel_2d = torch.outer(kernel_1d, kernel_1d)
-    kernel_2d = kernel_2d.view(1, 1, kernel_size, kernel_size)
-    x = score_map.unsqueeze(1)
-    x = F.pad(x, (radius, radius, radius, radius), mode="reflect")
-    x = F.conv2d(x, kernel_2d)
-    return x.squeeze(1)
+
+    device = score_map.device
+    dtype = score_map.dtype
+    b, h, w = score_map.shape
+
+    # Convert to numpy, apply filter per-image, convert back
+    score_np = score_map.cpu().numpy()
+    blurred_np = np.empty_like(score_np)
+
+    for i in range(b):
+        blurred_np[i] = gaussian_filter(score_np[i], sigma=sigma, mode='reflect')
+
+    return torch.from_numpy(blurred_np).to(device=device, dtype=dtype)
 
 
 def topk_image_score(score_map: torch.Tensor, ratio: float = 0.01) -> torch.Tensor:

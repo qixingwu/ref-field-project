@@ -120,9 +120,13 @@ python infer.py --config ref_field/configs/mvtec.yaml --category bottle --split 
 
 ## Notes
 
-### Inference smoothing
+### Evaluation protocol
 
-Default `smoothing_sigma=0.0` preserves pixel-level anomaly boundaries, which typically improves pixel-level AP.
+The evaluation protocol is aligned more closely with PatchCore-style scoring:
+- **Image-level score**: aggregated from original patch-level anomaly scores (max pooling), decoupled from segmentation smoothing
+- **Pixel-level score**: upsampled to GT mask resolution, then Gaussian smoothed with `sigma=4.0` (default, matching PatchCore)
+
+This separation ensures image-level metrics are not affected by segmentation post-processing.
 
 ### Encoder choices
 

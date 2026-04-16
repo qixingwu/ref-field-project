@@ -142,10 +142,13 @@ def main():
             nuis = make_nuisance_views(image)
             out = model(image, retrieved, nuisance_views=nuis, image_topk_ratio=cfg["infer"]["topk_ratio"])
 
-            score_map = upsample_score_map(out["score_map"], size=mask.shape[-2:])
-            score_map = gaussian_blur(score_map, sigma=cfg["infer"]["smoothing_sigma"])
-            score_np = score_map[0].cpu().numpy().astype(np.float32)
-            img_score = float(score_np.reshape(-1)[np.argsort(-score_np.reshape(-1))[:max(1, int(score_np.size * cfg['infer']['topk_ratio']))]].mean())
+            # Image-level score: aggregate from original patch-level map (decoupled from segmentation smoothing)
+            img_score = float(out["score_map"][0].max().item())
+
+            # Pixel-level score: upsample then apply Gaussian smoothing
+            pixel_map = upsample_score_map(out["score_map"], size=mask.shape[-2:])
+            pixel_map = gaussian_blur(pixel_map, sigma=cfg["infer"]["smoothing_sigma"])
+            score_np = pixel_map[0].cpu().numpy().astype(np.float32)
 
             image_labels.append(label)
             image_scores.append(img_score)
