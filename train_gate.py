@@ -124,9 +124,23 @@ def main():
         batch = next(iter(train_dl))["image"].to(device)
         model.extract_tokens(batch)
 
-    if args.resume_context:
-        state = torch.load(args.resume_context, map_location="cpu")
+    # Load context checkpoint: explicit path takes priority, otherwise try auto path
+    context_path = args.resume_context
+    if not context_path:
+        auto_path = Path(cfg["work_dir"]) / args.category / "checkpoints" / "context_last.pt"
+        if auto_path.exists():
+            context_path = str(auto_path)
+            print(f"[Gate Training] Auto-loading context checkpoint from: {context_path}")
+        else:
+            print(f"[Gate Training] WARNING: No context checkpoint found at {auto_path}")
+            print(f"[Gate Training] Will train gate WITHOUT pretrained context weights.")
+    else:
+        print(f"[Gate Training] Loading context checkpoint from: {context_path}")
+
+    if context_path:
+        state = torch.load(context_path, map_location="cpu")
         model.load_state_dict(state["model"], strict=False)
+        print(f"[Gate Training] Context checkpoint loaded successfully.")
 
     store, index = build_memory(model, mem_dl, device)
 
@@ -161,7 +175,11 @@ def main():
                 out = model(x_mix, retrieved, nuisance_views=nuis, image_topk_ratio=cfg["infer"]["topk_ratio"])
                 score_map = out["score_map"]
                 score_up = F.interpolate(score_map.unsqueeze(1), size=y_mask.shape[-2:], mode="bilinear", align_corners=False).squeeze(1)
-                loss_bce = F.binary_cross_entropy_with_logits(score_up, y_mask)
+                # Standardize per-image for BCE logits
+                score_mean = score_up.mean(dim=(-2, -1), keepdim=True)
+                score_std = score_up.std(dim=(-2, -1), keepdim=True, unbiased=False)
+                score_logit = (score_up - score_mean) / (score_std + 1e-6)
+                loss_bce = F.binary_cross_entropy_with_logits(score_logit, y_mask)
 
                 pos = score_up[y_mask > 0.5]
                 neg = score_up[y_mask <= 0.5]

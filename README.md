@@ -116,7 +116,13 @@ python train_gate.py --config ref_field/configs/mvtec.yaml --category bottle
 python infer.py --config ref_field/configs/mvtec.yaml --category bottle --split test
 ```
 
+**Checkpoint auto-loading**: The scripts automatically find checkpoints at `<work_dir>/<category>/checkpoints/`. You can still manually specify `--resume_context` or `--checkpoint` to override.
+
 ## Notes
+
+### Inference smoothing
+
+Default `smoothing_sigma=0.0` preserves pixel-level anomaly boundaries, which typically improves pixel-level AP.
 
 ### Encoder choices
 

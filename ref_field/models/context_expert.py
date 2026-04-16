@@ -46,10 +46,33 @@ class ContextExpert(nn.Module):
         return nll[mask].mean()
 
     def forward(self, z: torch.Tensor):
-        # Inference: mask every token independently is expensive.
-        # We approximate by using a random mask once and score all tokens.
-        mask = self.random_mask(z.shape[0], z.shape[1], z.device, ratio=self.mask_ratio)
-        mu, logvar = self.predict(z, mask)
-        e = ((z - mu) ** 2).sum(dim=-1) / torch.exp(logvar) + logvar
-        r = torch.exp(-logvar)
+        # Deterministic inference: sliding window mask to ensure each token is scored exactly once
+        b, n, d = z.shape
+        m = max(1, int(n * self.mask_ratio))
+
+        # Initialize accumulators
+        e_accum = torch.zeros((b, n), device=z.device)
+        r_accum = torch.zeros((b, n), device=z.device)
+        count = torch.zeros((b, n), dtype=torch.float32, device=z.device)
+
+        # Sliding window: each window of size m is masked exactly once
+        for start in range(0, n, m):
+            end = min(start + m, n)
+            # Create mask for current window
+            mask = torch.zeros((b, n), dtype=torch.bool, device=z.device)
+            mask[:, start:end] = True
+
+            # Predict for this mask
+            mu, logvar = self.predict(z, mask)
+            e = ((z - mu) ** 2).sum(dim=-1) / torch.exp(logvar) + logvar
+            r = torch.exp(-logvar)
+
+            # Accumulate only for masked positions
+            e_accum += e * mask
+            r_accum += r * mask
+            count += mask
+
+        # Average tokens that were covered multiple times (edge case)
+        e = e_accum / count.clamp(min=1.0)
+        r = r_accum / count.clamp(min=1.0)
         return e, r

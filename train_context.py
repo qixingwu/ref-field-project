@@ -58,9 +58,15 @@ def main():
         batch = next(iter(dl))["image"].to(device)
         model.extract_tokens(batch)
 
+    # Always train context_expert and projector (if exists)
     params = list(model.context_expert.parameters())
-    if model.projector is not None and not cfg["model"]["freeze_encoder"]:
+    if model.projector is not None:
         params += list(model.projector.parameters())
+    # Only add encoder params if not frozen
+    if not cfg["model"]["freeze_encoder"]:
+        for p in model.encoder.parameters():
+            if p.requires_grad:
+                params.append(p)
     optimizer = torch.optim.AdamW(params, lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"])
     scaler = GradScaler(enabled=bool(cfg["train"]["amp"]) and device.type == "cuda")
 

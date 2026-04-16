@@ -33,5 +33,5 @@ train:
   amp: true
 
 infer:
-  smoothing_sigma: 1.0
+  smoothing_sigma: 0.0
   topk_ratio: 0.01

@@ -104,9 +104,24 @@ def main():
         batch = next(iter(train_dl))["image"].to(device)
         model.extract_tokens(batch)
 
-    if args.checkpoint:
-        state = torch.load(args.checkpoint, map_location="cpu")
-        model.load_state_dict(state["model"], strict=False)
+    # Load gate checkpoint: explicit path takes priority, otherwise try auto path
+    checkpoint_path = args.checkpoint
+    if not checkpoint_path:
+        auto_path = Path(cfg["work_dir"]) / args.category / "checkpoints" / "gate_last.pt"
+        if auto_path.exists():
+            checkpoint_path = str(auto_path)
+            print(f"[Inference] Auto-loading gate checkpoint from: {checkpoint_path}")
+        else:
+            raise FileNotFoundError(
+                f"No checkpoint found at {auto_path}. "
+                f"Please train the gate first or specify --checkpoint <path>."
+            )
+    else:
+        print(f"[Inference] Loading gate checkpoint from: {checkpoint_path}")
+
+    state = torch.load(checkpoint_path, map_location="cpu")
+    model.load_state_dict(state["model"], strict=False)
+    print(f"[Inference] Gate checkpoint loaded successfully.")
 
     store, index = build_memory(model, train_dl, device)
     model.eval()

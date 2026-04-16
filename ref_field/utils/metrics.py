@@ -18,50 +18,153 @@ def safe_ap(y_true: np.ndarray, y_score: np.ndarray) -> float:
     return float(average_precision_score(y_true, y_score))
 
 
+def _connected_components(binary_mask: np.ndarray) -> List[np.ndarray]:
+    """Extract 4-connected components from a binary mask using pure numpy.
+
+    Args:
+        binary_mask: 2D binary array (H, W) where True indicates foreground
+
+    Returns:
+        List of boolean masks, one per connected component
+    """
+    components = []
+    visited = np.zeros_like(binary_mask, dtype=bool)
+    h, w = binary_mask.shape
+
+    # 4-connected directions: up, down, left, right
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+    for i in range(h):
+        for j in range(w):
+            if binary_mask[i, j] and not visited[i, j]:
+                # BFS to find this component
+                component = np.zeros_like(binary_mask, dtype=bool)
+                stack = [(i, j)]
+                visited[i, j] = True
+
+                while stack:
+                    ci, cj = stack.pop()
+                    component[ci, cj] = True
+
+                    for di, dj in directions:
+                        ni, nj = ci + di, cj + dj
+                        if (0 <= ni < h and 0 <= nj < w and
+                            binary_mask[ni, nj] and not visited[ni, nj]):
+                            visited[ni, nj] = True
+                            stack.append((ni, nj))
+
+                components.append(component)
+
+    return components
+
+
 def compute_pro_auc(masks: List[np.ndarray], score_maps: List[np.ndarray], fpr_limit: float = 0.3) -> float:
     """
-    Compute PRO (Per-Region Overpass) metric AUC.
-    Reference: https://github.com/optimass-continual-learning/continual_anomaly_detection
+    Compute PRO (Per-Region Overlap) metric AUC at region level.
+
+    For each threshold, we compute:
+    - PRO: average overlap between predicted regions and ground truth regions
+    - FPR: false positive rate on normal pixels
 
     Args:
         masks: List of ground truth masks
         score_maps: List of anomaly score maps
         fpr_limit: False positive rate limit for PRO curve (default 0.3)
     """
-    # Flatten and concatenate all masks and score maps
-    y_true = np.concatenate([m.astype(np.float32).reshape(-1) for m in masks], axis=0)
-    y_score = np.concatenate([s.astype(np.float32).reshape(-1) for s in score_maps], axis=0)
-
-    # Sort scores descending
-    sorted_indices = np.argsort(y_score)[::-1]
-    y_true_sorted = y_true[sorted_indices]
-
-    # Calculate true positives at each threshold
-    tp_cumsum = np.cumsum(y_true_sorted)
-    total_positive = np.sum(y_true)
-
-    if total_positive == 0:
+    if len(masks) == 0 or len(score_maps) == 0:
         return float("nan")
 
-    # Calculate FPR and TPR
-    num_pixels = len(y_true)
-    num_negative = num_pixels - total_positive
+    # Binarize masks and collect scores
+    bin_masks = [(m > 0.5).astype(np.uint8) for m in masks]
 
-    fp_cumsum = np.arange(1, num_pixels + 1) - tp_cumsum
-    fpr = fp_cumsum / num_negative
-    tpr = tp_cumsum / total_positive
+    # Count total normal pixels
+    total_normal = sum(np.sum(1 - m) for m in bin_masks)
+    if total_normal == 0:
+        return float("nan")
 
-    # Filter by FPR limit
-    valid_mask = fpr <= fpr_limit
+    # Collect all scores for threshold sampling
+    all_scores = np.concatenate([s.astype(np.float32).reshape(-1) for s in score_maps])
+    num_thresholds = min(512, len(np.unique(all_scores)))
+    thresholds = np.percentile(all_scores, np.linspace(100, 0, num_thresholds))
 
+    # Initialize arrays for PRO and FPR at each threshold
+    pro_values = []
+    fpr_values = []
+
+    for thresh in thresholds:
+        # Initialize accumulators
+        total_regions = 0
+        sum_overlap = 0.0
+        fp_count = 0
+
+        for mask, score_map in zip(bin_masks, score_maps):
+            pred = (score_map >= thresh).astype(np.uint8)
+
+            # Count FP on normal pixels
+            normal_mask = (1 - mask)
+            fp_count += np.sum(pred & normal_mask)
+
+            # Extract connected components from GT
+            components = _connected_components(mask.astype(bool))
+
+            if len(components) == 0:
+                continue
+
+            # Compute overlap for each region
+            for comp in components:
+                region_pixels = comp.sum()
+                if region_pixels == 0:
+                    continue
+                overlap = np.mean(pred[comp])
+                sum_overlap += overlap
+                total_regions += 1
+
+        if total_regions == 0:
+            continue
+
+        pro = sum_overlap / total_regions
+        fpr = fp_count / total_normal
+
+        pro_values.append(pro)
+        fpr_values.append(fpr)
+
+    if len(pro_values) == 0:
+        return float("nan")
+
+    # Convert to arrays and sort by FPR
+    pro_values = np.array(pro_values)
+    fpr_values = np.array(fpr_values)
+
+    # Sort by FPR ascending
+    sort_idx = np.argsort(fpr_values)
+    fpr_values = fpr_values[sort_idx]
+    pro_values = pro_values[sort_idx]
+
+    # Filter to FPR <= fpr_limit
+    valid_mask = fpr_values <= fpr_limit
     if not np.any(valid_mask):
         return float("nan")
 
-    fpr_valid = fpr[valid_mask]
-    tpr_valid = tpr[valid_mask]
+    fpr_valid = fpr_values[valid_mask]
+    pro_valid = pro_values[valid_mask]
 
-    # Compute AUC using trapezoidal rule
-    pro_auc = np.trapz(tpr_valid, fpr_valid) / fpr_limit
+    # Linear interpolation at fpr_limit if needed
+    if fpr_valid[-1] < fpr_limit and len(fpr_valid) > 1:
+        # Extrapolate to fpr_limit
+        last_fpr = fpr_valid[-1]
+        last_pro = pro_valid[-1]
+        second_last_fpr = fpr_valid[-2]
+        second_last_pro = pro_valid[-2]
+
+        # Linear interpolation
+        if last_fpr > second_last_fpr:
+            slope = (last_pro - second_last_pro) / (last_fpr - second_last_fpr)
+            pro_at_limit = last_pro + slope * (fpr_limit - last_fpr)
+            fpr_valid = np.append(fpr_valid, fpr_limit)
+            pro_valid = np.append(pro_valid, pro_at_limit)
+
+    # Compute AUC using trapezoidal rule, normalized by fpr_limit
+    pro_auc = np.trapz(pro_valid, fpr_valid) / fpr_limit
 
     return float(pro_auc)
 
