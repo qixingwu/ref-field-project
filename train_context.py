@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 from torch.cuda.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 from tqdm import tqdm
 
 from ref_field.datasets.mvtec import MVTecADDataset
@@ -17,8 +17,55 @@ from ref_field.utils.misc import ensure_dir, get_device, save_checkpoint, set_se
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, required=True)
-    ap.add_argument("--category", type=str, required=True)
+    ap.add_argument("--category", type=str, default=None)
+    ap.add_argument("--context_scope", type=str, choices=["category", "dataset_shared"], default="category")
     return ap.parse_args()
+
+
+def discover_mvtec_categories(root):
+    root = Path(root)
+    if not root.exists():
+        raise FileNotFoundError(f"MVTec root does not exist: {root}")
+
+    categories = [
+        p.name
+        for p in sorted(root.iterdir())
+        if p.is_dir() and (p / "train" / "good").is_dir()
+    ]
+    if not categories:
+        raise ValueError(f"No MVTec categories with train/good found under: {root}")
+    return categories
+
+
+def build_context_dataset(cfg, args):
+    if args.context_scope == "category":
+        if not args.category:
+            raise ValueError("--category is required when --context_scope category")
+        categories = [args.category]
+        ds = MVTecADDataset(
+            root=cfg["data"]["root"],
+            category=args.category,
+            split="train",
+            image_size=cfg["data"]["image_size"],
+            good_only=True,
+        )
+        out_dir = ensure_dir(Path(cfg["work_dir"]) / args.category / "checkpoints")
+        return ds, categories, out_dir
+
+    categories = discover_mvtec_categories(cfg["data"]["root"])
+    datasets = [
+        MVTecADDataset(
+            root=cfg["data"]["root"],
+            category=category,
+            split="train",
+            image_size=cfg["data"]["image_size"],
+            good_only=True,
+        )
+        for category in categories
+    ]
+    ds = ConcatDataset(datasets)
+    out_dir = ensure_dir(Path(cfg["work_dir"]) / "_shared_context" / "mvtec" / "checkpoints")
+    return ds, categories, out_dir
 
 
 def main():
@@ -27,13 +74,12 @@ def main():
     set_seed(cfg["seed"])
     device = get_device()
 
-    ds = MVTecADDataset(
-        root=cfg["data"]["root"],
-        category=args.category,
-        split="train",
-        image_size=cfg["data"]["image_size"],
-        good_only=True,
-    )
+    ds, categories, out_dir = build_context_dataset(cfg, args)
+    print(f"context_scope: {args.context_scope}")
+    if args.context_scope == "dataset_shared":
+        print(f"shared MVTec categories ({len(categories)}): {', '.join(categories)}")
+    print(f"checkpoint_dir: {out_dir}")
+
     dl = DataLoader(
         ds,
         batch_size=cfg["data"]["batch_size"],
@@ -70,8 +116,6 @@ def main():
     optimizer = torch.optim.AdamW(params, lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"])
     scaler = GradScaler(enabled=bool(cfg["train"]["amp"]) and device.type == "cuda")
 
-    out_dir = ensure_dir(Path(cfg["work_dir"]) / args.category / "checkpoints")
-
     model.train()
     for epoch in range(cfg["train"]["epochs_context"]):
         pbar = tqdm(dl, desc=f"context epoch {epoch+1}/{cfg['train']['epochs_context']}")
@@ -96,6 +140,8 @@ def main():
             "optimizer": optimizer.state_dict(),
             "config": cfg,
             "category": args.category,
+            "context_scope": args.context_scope,
+            "categories": categories,
         })
 
 
