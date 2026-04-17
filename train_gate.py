@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 from tqdm import tqdm
 
 from ref_field.datasets.mvtec import MVTecADDataset
@@ -26,6 +26,7 @@ def parse_args():
     ap.add_argument("--category", type=str, required=True)
     ap.add_argument("--resume_context", type=str, default="")
     ap.add_argument("--context_scope", type=str, choices=["category", "dataset_shared"], default="category")
+    ap.add_argument("--gate_scope", type=str, choices=["category", "dataset_shared"], default="category")
     return ap.parse_args()
 
 
@@ -72,6 +73,50 @@ def resolve_context_checkpoint(cfg, args):
     return Path(cfg["work_dir"]) / "_shared_context" / "mvtec" / "checkpoints" / "context_last.pt", "shared auto path"
 
 
+def discover_mvtec_categories(root):
+    root = Path(root)
+    if not root.exists():
+        raise FileNotFoundError(f"MVTec root does not exist: {root}")
+
+    categories = [
+        p.name
+        for p in sorted(root.iterdir())
+        if p.is_dir() and (p / "train" / "good").is_dir()
+    ]
+    if not categories:
+        raise ValueError(f"No MVTec categories with train/good found under: {root}")
+    return categories
+
+
+def build_gate_dataset(cfg, args):
+    if args.gate_scope == "category":
+        categories = [args.category]
+        ds = MVTecADDataset(
+            root=cfg["data"]["root"],
+            category=args.category,
+            split="train",
+            image_size=cfg["data"]["image_size"],
+            good_only=True,
+        )
+        out_dir = ensure_dir(Path(cfg["work_dir"]) / args.category / "checkpoints")
+        return ds, categories, out_dir
+
+    categories = discover_mvtec_categories(cfg["data"]["root"])
+    datasets = [
+        MVTecADDataset(
+            root=cfg["data"]["root"],
+            category=category,
+            split="train",
+            image_size=cfg["data"]["image_size"],
+            good_only=True,
+        )
+        for category in categories
+    ]
+    ds = ConcatDataset(datasets)
+    out_dir = ensure_dir(Path(cfg["work_dir"]) / "_shared_gate" / "mvtec" / "checkpoints")
+    return ds, categories, out_dir
+
+
 def retrieve_bank(model: RefField, image: torch.Tensor, store: TokenStore, index: ImageIndex, top_r: int, device: torch.device) -> torch.Tensor:
     with torch.no_grad():
         g = model.global_descriptor(image).detach().cpu().numpy().astype(np.float32)
@@ -97,13 +142,13 @@ def main():
     set_seed(cfg["seed"])
     device = get_device()
 
-    train_ds = MVTecADDataset(
-        root=cfg["data"]["root"],
-        category=args.category,
-        split="train",
-        image_size=cfg["data"]["image_size"],
-        good_only=True,
-    )
+    train_ds, categories, out_dir = build_gate_dataset(cfg, args)
+    print(f"[Gate Training] gate_scope: {args.gate_scope}")
+    print(f"[Gate Training] context_scope: {args.context_scope}")
+    if args.gate_scope == "dataset_shared":
+        print(f"[Gate Training] shared MVTec gate categories ({len(categories)}): {', '.join(categories)}")
+    print(f"[Gate Training] checkpoint_dir: {out_dir}")
+
     train_dl = DataLoader(
         train_ds,
         batch_size=cfg["data"]["batch_size"],
@@ -137,7 +182,6 @@ def main():
 
     # Load context checkpoint: explicit path takes priority, otherwise use context_scope.
     context_path, context_source = resolve_context_checkpoint(cfg, args)
-    print(f"[Gate Training] context_scope: {args.context_scope}")
     if context_path.exists():
         print(f"[Gate Training] Loading context checkpoint via {context_source}: {context_path}")
         state = torch.load(context_path, map_location="cpu")
@@ -159,8 +203,6 @@ def main():
     params = list(model.gate.parameters())
     scaler = GradScaler(enabled=bool(cfg["train"]["amp"]) and device.type == "cuda")
     optimizer = torch.optim.AdamW(params, lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"])
-
-    out_dir = ensure_dir(Path(cfg["work_dir"]) / args.category / "checkpoints")
 
     model.train()
     for epoch in range(cfg["train"]["epochs_gate"]):
@@ -215,6 +257,8 @@ def main():
             "optimizer": optimizer.state_dict(),
             "config": cfg,
             "category": args.category,
+            "gate_scope": args.gate_scope,
+            "categories": categories,
         })
 
 
