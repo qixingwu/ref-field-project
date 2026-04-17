@@ -1,191 +1,377 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Union
 
+import cv2
 import numpy as np
-from sklearn.metrics import roc_auc_score, average_precision_score
+import pandas as pd
+from sklearn import metrics
+from sklearn.metrics import auc, precision_recall_curve, roc_auc_score, roc_curve
+from skimage import measure
 
 
-def safe_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
-    if len(np.unique(y_true)) < 2:
-        return float("nan")
-    return float(roc_auc_score(y_true, y_score))
-
-
-def safe_ap(y_true: np.ndarray, y_score: np.ndarray) -> float:
-    if len(np.unique(y_true)) < 2:
-        return float("nan")
-    return float(average_precision_score(y_true, y_score))
-
-
-def _connected_components(binary_mask: np.ndarray) -> List[np.ndarray]:
-    """Extract 4-connected components from a binary mask using pure numpy.
+def compute_imagewise_retrieval_metrics(
+    anomaly_prediction_weights: Union[np.ndarray, List[float]],
+    anomaly_ground_truth_labels: Union[np.ndarray, List[int]],
+) -> Dict[str, Union[float, np.ndarray]]:
+    """
+    Compute image-level retrieval metrics following reference implementation.
 
     Args:
-        binary_mask: 2D binary array (H, W) where True indicates foreground
+        anomaly_prediction_weights: Array of anomaly scores for each image
+        anomaly_ground_truth_labels: Array of ground truth labels (0=normal, 1=anomaly)
 
     Returns:
-        List of boolean masks, one per connected component
+        Dictionary containing:
+            - auroc: Area under ROC curve
+            - fpr: False positive rates at each threshold
+            - tpr: True positive rates at each threshold
+            - threshold: Threshold values for ROC curve
+            - precision: Precision values at each threshold
+            - recall: Recall values at each threshold
+            - pr_threshold: Threshold values for PR curve
+            - auc_pr: Area under Precision-Recall curve
     """
-    components = []
-    visited = np.zeros_like(binary_mask, dtype=bool)
-    h, w = binary_mask.shape
+    y_true = np.asarray(anomaly_ground_truth_labels)
+    y_score = np.asarray(anomaly_prediction_weights)
 
-    # 4-connected directions: up, down, left, right
-    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    # Handle edge cases
+    if len(y_true) == 0 or len(y_score) == 0:
+        return {
+            "auroc": float("nan"),
+            "fpr": np.array([]),
+            "tpr": np.array([]),
+            "threshold": np.array([]),
+            "precision": np.array([]),
+            "recall": np.array([]),
+            "pr_threshold": np.array([]),
+            "auc_pr": float("nan"),
+        }
 
-    for i in range(h):
-        for j in range(w):
-            if binary_mask[i, j] and not visited[i, j]:
-                # BFS to find this component
-                component = np.zeros_like(binary_mask, dtype=bool)
-                stack = [(i, j)]
-                visited[i, j] = True
+    # Check if we have both classes
+    if len(np.unique(y_true)) < 2:
+        # Return empty arrays with nan values for single-class case
+        return {
+            "auroc": float("nan"),
+            "fpr": np.array([]),
+            "tpr": np.array([]),
+            "threshold": np.array([]),
+            "precision": np.full(len(y_true), np.nan),
+            "recall": np.full(len(y_true), np.nan),
+            "pr_threshold": np.full(len(y_true), np.nan),
+            "auc_pr": float("nan"),
+        }
 
-                while stack:
-                    ci, cj = stack.pop()
-                    component[ci, cj] = True
+    # Compute ROC curve
+    fpr, tpr, threshold = roc_curve(y_true, y_score)
+    auroc = float(roc_auc_score(y_true, y_score))
 
-                    for di, dj in directions:
-                        ni, nj = ci + di, cj + dj
-                        if (0 <= ni < h and 0 <= nj < w and
-                            binary_mask[ni, nj] and not visited[ni, nj]):
-                            visited[ni, nj] = True
-                            stack.append((ni, nj))
+    # Compute Precision-Recall curve
+    precision, recall, pr_threshold = precision_recall_curve(y_true, y_score)
+    auc_pr = float(auc(recall, precision))
 
-                components.append(component)
+    return {
+        "auroc": auroc,
+        "fpr": fpr,
+        "tpr": tpr,
+        "threshold": threshold,
+        "precision": precision,
+        "recall": recall,
+        "pr_threshold": pr_threshold,
+        "auc_pr": auc_pr,
+    }
 
-    return components
 
-
-def compute_pro_auc(masks: List[np.ndarray], score_maps: List[np.ndarray], fpr_limit: float = 0.3) -> float:
+def compute_pixelwise_retrieval_metrics(
+    anomaly_segmentations: Union[np.ndarray, List[np.ndarray]],
+    ground_truth_masks: Union[np.ndarray, List[np.ndarray]],
+) -> Dict[str, Union[float, np.ndarray]]:
     """
-    Compute PRO (Per-Region Overlap) metric AUC at region level.
-
-    For each threshold, we compute:
-    - PRO: average overlap between predicted regions and ground truth regions
-    - FPR: false positive rate on normal pixels
+    Compute pixel-level retrieval metrics following reference implementation.
 
     Args:
-        masks: List of ground truth masks
-        score_maps: List of anomaly score maps
-        fpr_limit: False positive rate limit for PRO curve (default 0.3)
+        anomaly_segmentations: Predicted anomaly score maps
+        ground_truth_masks: Ground truth binary masks
+
+    Returns:
+        Dictionary containing:
+            - auroc: Area under ROC curve
+            - fpr: False positive rates at each threshold
+            - tpr: True positive rates at each threshold
+            - optimal_threshold: Threshold that maximizes F1 score
+            - optimal_fpr: False positive rate at optimal threshold
+            - optimal_fnr: False negative rate at optimal threshold
+            - precision: Precision values at each threshold
+            - recall: Recall values at each threshold
+            - pr_threshold: Threshold values for PR curve
+            - auc_pr: Area under Precision-Recall curve
+            - f1_scores: F1 scores at each threshold
     """
-    if len(masks) == 0 or len(score_maps) == 0:
+    # Convert lists to stacked arrays
+    if isinstance(anomaly_segmentations, list):
+        anomaly_segmentations = np.stack(anomaly_segmentations, axis=0)
+    if isinstance(ground_truth_masks, list):
+        ground_truth_masks = np.stack(ground_truth_masks, axis=0)
+
+    # Flatten arrays
+    flat_anomaly_segmentations = anomaly_segmentations.reshape(-1)
+    flat_ground_truth_masks = ground_truth_masks.reshape(-1)
+
+    # Handle edge cases
+    if len(flat_ground_truth_masks) == 0 or len(flat_anomaly_segmentations) == 0:
+        return {
+            "auroc": float("nan"),
+            "fpr": np.array([]),
+            "tpr": np.array([]),
+            "optimal_threshold": float("nan"),
+            "optimal_fpr": float("nan"),
+            "optimal_fnr": float("nan"),
+            "precision": np.array([]),
+            "recall": np.array([]),
+            "pr_threshold": np.array([]),
+            "auc_pr": float("nan"),
+            "f1_scores": np.array([]),
+        }
+
+    # Check if we have both classes
+    if len(np.unique(flat_ground_truth_masks)) < 2:
+        return {
+            "auroc": float("nan"),
+            "fpr": np.array([]),
+            "tpr": np.array([]),
+            "optimal_threshold": float("nan"),
+            "optimal_fpr": float("nan"),
+            "optimal_fnr": float("nan"),
+            "precision": np.full(1, np.nan),
+            "recall": np.full(1, np.nan),
+            "pr_threshold": np.full(1, np.nan),
+            "auc_pr": float("nan"),
+            "f1_scores": np.full(1, np.nan),
+        }
+
+    # Compute ROC curve
+    fpr, tpr, _ = roc_curve(flat_ground_truth_masks, flat_anomaly_segmentations)
+    auroc = float(roc_auc_score(flat_ground_truth_masks, flat_anomaly_segmentations))
+
+    # Compute Precision-Recall curve
+    precision, recall, pr_thresholds = precision_recall_curve(
+        flat_ground_truth_masks, flat_anomaly_segmentations
+    )
+    auc_pr = float(auc(recall, precision))
+
+    # Compute F1 scores with zero division protection
+    # Avoid division by zero: if precision + recall == 0, F1 = 0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        f1_scores = 2 * precision * recall / (precision + recall)
+    f1_scores = np.nan_to_num(f1_scores, nan=0.0)
+
+    # Select optimal threshold (max F1, excluding last element which has threshold=0)
+    optimal_threshold = float(pr_thresholds[np.argmax(f1_scores[:-1])])
+
+    # Compute predictions at optimal threshold
+    predictions = (flat_anomaly_segmentations >= optimal_threshold).astype(int)
+
+    # Compute optimal FPR and FNR
+    optimal_fpr = float(np.mean(predictions > flat_ground_truth_masks))
+    optimal_fnr = float(np.mean(predictions < flat_ground_truth_masks))
+
+    return {
+        "auroc": auroc,
+        "fpr": fpr,
+        "tpr": tpr,
+        "optimal_threshold": optimal_threshold,
+        "optimal_fpr": optimal_fpr,
+        "optimal_fnr": optimal_fnr,
+        "precision": precision,
+        "recall": recall,
+        "pr_threshold": pr_thresholds,
+        "auc_pr": auc_pr,
+        "f1_scores": f1_scores,
+    }
+
+
+def compute_pro(
+    masks: Union[np.ndarray, List[np.ndarray]],
+    amaps: Union[np.ndarray, List[np.ndarray]],
+    num_th: int = 200,
+) -> float:
+    """
+    Compute PRO (Per-Region Overlap) AUC following reference implementation.
+
+    This implements the exact logic from the reference metrics.py:
+    - Uses cv2.dilate with 5x5 rectangular kernel
+    - Uses skimage.measure.regionprops for connected components
+    - Normalizes FPR by its maximum value after filtering fpr < 0.3
+    - Uses 200 thresholds by default
+
+    Args:
+        masks: Ground truth binary masks (list or array)
+        amaps: Anomaly score maps (list or array)
+        num_th: Number of thresholds to evaluate (default 200)
+
+    Returns:
+        PRO AUC score (float)
+    """
+    # Convert lists to arrays
+    if isinstance(masks, list):
+        masks = np.stack(masks, axis=0)
+    if isinstance(amaps, list):
+        amaps = np.stack(amaps, axis=0)
+
+    # Handle edge cases
+    if len(masks) == 0 or len(amaps) == 0:
         return float("nan")
 
-    # Binarize masks and collect scores
-    bin_masks = [(m > 0.5).astype(np.uint8) for m in masks]
+    # Get score range
+    min_th = amaps.min()
+    max_th = amaps.max()
 
-    # Count total normal pixels
-    total_normal = sum(np.sum(1 - m) for m in bin_masks)
-    if total_normal == 0:
+    # Handle constant score maps
+    delta = (max_th - min_th) / num_th
+    if delta == 0:
         return float("nan")
 
-    # Collect all scores for threshold sampling
-    all_scores = np.concatenate([s.astype(np.float32).reshape(-1) for s in score_maps])
-    num_thresholds = min(512, len(np.unique(all_scores)))
-    thresholds = np.percentile(all_scores, np.linspace(100, 0, num_thresholds))
+    # Thresholds
+    thresholds = np.arange(min_th, max_th, delta)
 
-    # Initialize arrays for PRO and FPR at each threshold
-    pro_values = []
-    fpr_values = []
+    # Structuring element for dilation
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
-    for thresh in thresholds:
-        # Initialize accumulators
-        total_regions = 0
-        sum_overlap = 0.0
-        fp_count = 0
+    results = []
 
-        for mask, score_map in zip(bin_masks, score_maps):
-            pred = (score_map >= thresh).astype(np.uint8)
+    for th in thresholds:
+        # Create binary anomaly maps at this threshold
+        binary_amaps = (amaps >= th).astype(np.uint8)
 
-            # Count FP on normal pixels
-            normal_mask = (1 - mask)
-            fp_count += np.sum(pred & normal_mask)
+        # Dilate binary maps
+        dilated_amaps = []
+        for i in range(len(binary_amaps)):
+            dilated = cv2.dilate(binary_amaps[i], k)
+            dilated_amaps.append(dilated)
+        dilated_amaps = np.stack(dilated_amaps, axis=0)
 
-            # Extract connected components from GT
-            components = _connected_components(mask.astype(bool))
+        # Compute PRO score
+        pro_scores = []
+        for mask, dilated_amap in zip(masks, dilated_amaps):
+            # Get connected components from ground truth
+            regions = measure.regionprops(measure.label(mask))
 
-            if len(components) == 0:
+            if len(regions) == 0:
                 continue
 
             # Compute overlap for each region
-            for comp in components:
-                region_pixels = comp.sum()
-                if region_pixels == 0:
-                    continue
-                overlap = np.mean(pred[comp])
-                sum_overlap += overlap
-                total_regions += 1
+            for region in regions:
+                # Get region mask
+                region_mask = (measure.label(mask) == region.label)
+                tp_pixels = np.logical_and(region_mask, dilated_amap).sum()
+                pro_scores.append(tp_pixels / region.area)
 
-        if total_regions == 0:
-            continue
+        if len(pro_scores) == 0:
+            pro = 0.0
+        else:
+            pro = np.mean(pro_scores)
 
-        pro = sum_overlap / total_regions
-        fpr = fp_count / total_normal
+        # Compute FPR
+        inverse_masks = 1 - masks
+        fp_pixels = np.logical_and(inverse_masks, binary_amaps).sum()
+        fpr = fp_pixels / inverse_masks.sum()
 
-        pro_values.append(pro)
-        fpr_values.append(fpr)
+        results.append({
+            "pro": pro,
+            "fpr": fpr,
+            "threshold": th,
+        })
 
-    if len(pro_values) == 0:
+    # Convert to DataFrame
+    df = pd.DataFrame(results)
+
+    # Filter to FPR < 0.3
+    df = df[df["fpr"] < 0.3]
+
+    # Handle empty dataframe after filtering
+    if len(df) == 0:
         return float("nan")
 
-    # Convert to arrays and sort by FPR
-    pro_values = np.array(pro_values)
-    fpr_values = np.array(fpr_values)
-
-    # Sort by FPR ascending
-    sort_idx = np.argsort(fpr_values)
-    fpr_values = fpr_values[sort_idx]
-    pro_values = pro_values[sort_idx]
-
-    # Filter to FPR <= fpr_limit
-    valid_mask = fpr_values <= fpr_limit
-    if not np.any(valid_mask):
+    # Normalize FPR by its maximum
+    if df["fpr"].max() == 0:
         return float("nan")
 
-    fpr_valid = fpr_values[valid_mask]
-    pro_valid = pro_values[valid_mask]
+    df["fpr"] = df["fpr"] / df["fpr"].max()
 
-    # Linear interpolation at fpr_limit if needed
-    if fpr_valid[-1] < fpr_limit and len(fpr_valid) > 1:
-        # Extrapolate to fpr_limit
-        last_fpr = fpr_valid[-1]
-        last_pro = pro_valid[-1]
-        second_last_fpr = fpr_valid[-2]
-        second_last_pro = pro_valid[-2]
-
-        # Linear interpolation
-        if last_fpr > second_last_fpr:
-            slope = (last_pro - second_last_pro) / (last_fpr - second_last_fpr)
-            pro_at_limit = last_pro + slope * (fpr_limit - last_fpr)
-            fpr_valid = np.append(fpr_valid, fpr_limit)
-            pro_valid = np.append(pro_valid, pro_at_limit)
-
-    # Compute AUC using trapezoidal rule, normalized by fpr_limit
-    pro_auc = np.trapz(pro_valid, fpr_valid) / fpr_limit
+    # Compute AUC
+    pro_auc = metrics.auc(df["fpr"], df["pro"])
 
     return float(pro_auc)
 
 
-def image_level_metrics(labels: List[int], scores: List[float]) -> Dict[str, float]:
-    y_true = np.asarray(labels)
-    y_score = np.asarray(scores)
-    return {
-        "image_roc_auc": safe_roc_auc(y_true, y_score),
-        "image_ap": safe_ap(y_true, y_score),
-    }
+def image_level_metrics(
+    labels: List[int],
+    scores: List[float],
+) -> Dict[str, Union[float, np.ndarray]]:
+    """
+    Compute image-level metrics with backward-compatible field names.
+
+    This wrapper maintains compatibility with existing code while exposing
+    the full set of metrics from the reference implementation.
+
+    Returns:
+        Dictionary with both legacy and new field names:
+            - Legacy: image_roc_auc, image_ap
+            - New: image_auc_pr, image_fpr, image_tpr, image_threshold,
+                   image_precision, image_recall, image_pr_threshold
+    """
+    result = compute_imagewise_retrieval_metrics(scores, labels)
+
+    # Add backward-compatible aliases
+    result["image_roc_auc"] = result["auroc"]
+    result["image_ap"] = result["auc_pr"]
+    result["image_auc_pr"] = result["auc_pr"]
+    result["image_fpr"] = result["fpr"]
+    result["image_tpr"] = result["tpr"]
+    result["image_threshold"] = result["threshold"]
+    result["image_precision"] = result["precision"]
+    result["image_recall"] = result["recall"]
+    result["image_pr_threshold"] = result["pr_threshold"]
+
+    return result
 
 
-def pixel_level_metrics(masks: List[np.ndarray], score_maps: List[np.ndarray]) -> Dict[str, float]:
-    y_true = np.concatenate([m.astype(np.uint8).reshape(-1) for m in masks], axis=0)
-    y_score = np.concatenate([s.astype(np.float32).reshape(-1) for s in score_maps], axis=0)
+def pixel_level_metrics(
+    masks: List[np.ndarray],
+    score_maps: List[np.ndarray],
+) -> Dict[str, Union[float, np.ndarray]]:
+    """
+    Compute pixel-level metrics with backward-compatible field names.
 
-    pro_auc = compute_pro_auc(masks, score_maps)
+    This wrapper maintains compatibility with existing code while exposing
+    the full set of metrics from the reference implementation.
 
-    return {
-        "pixel_roc_auc": safe_roc_auc(y_true, y_score),
-        "pixel_ap": safe_ap(y_true, y_score),
-        "pixel_pro": pro_auc,
-    }
+    Returns:
+        Dictionary with both legacy and new field names:
+            - Legacy: pixel_roc_auc, pixel_ap, pixel_pro
+            - New: pixel_auc_pr, pixel_fpr, pixel_tpr, pixel_precision,
+                   pixel_recall, pixel_pr_threshold, pixel_f1_scores,
+                   pixel_optimal_threshold, pixel_optimal_fpr, pixel_optimal_fnr
+    """
+    # Compute PRO using reference implementation
+    pro_score = compute_pro(masks, score_maps)
+
+    # Compute other pixel metrics
+    result = compute_pixelwise_retrieval_metrics(score_maps, masks)
+
+    # Add backward-compatible aliases
+    result["pixel_roc_auc"] = result["auroc"]
+    result["pixel_ap"] = result["auc_pr"]
+    result["pixel_pro"] = pro_score
+    result["pixel_auc_pr"] = result["auc_pr"]
+    result["pixel_fpr"] = result["fpr"]
+    result["pixel_tpr"] = result["tpr"]
+    result["pixel_precision"] = result["precision"]
+    result["pixel_recall"] = result["recall"]
+    result["pixel_pr_threshold"] = result["pr_threshold"]
+    result["pixel_f1_scores"] = result["f1_scores"]
+    result["pixel_optimal_threshold"] = result["optimal_threshold"]
+    result["pixel_optimal_fpr"] = result["optimal_fpr"]
+    result["pixel_optimal_fnr"] = result["optimal_fnr"]
+
+    return result

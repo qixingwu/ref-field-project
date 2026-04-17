@@ -15,6 +15,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, required=True)
     ap.add_argument("--checkpoint", type=str, default="")
+    ap.add_argument("--save_vis", action="store_true", help="Save visualization images")
     args = ap.parse_args()
 
     for cat in MVTec_CATEGORIES:
@@ -26,6 +27,8 @@ def main():
         ]
         if args.checkpoint:
             cmd += ["--checkpoint", args.checkpoint]
+        if args.save_vis:
+            cmd += ["--save_vis"]
         print("Running:", " ".join(cmd))
         subprocess.run(cmd, check=False)
 
