@@ -46,21 +46,21 @@ class ContextExpert(nn.Module):
         return nll[mask].mean()
 
     def forward(self, z: torch.Tensor):
-        # Deterministic inference: sliding window mask to ensure each token is scored exactly once
+        # Deterministic inference: interleaved masking to avoid spatial block artifacts
         b, n, d = z.shape
-        m = max(1, int(n * self.mask_ratio))
+
+        # Number of groups for interleaved masking
+        num_groups = max(2, round(1 / self.mask_ratio))
 
         # Initialize accumulators
         e_accum = torch.zeros((b, n), device=z.device)
         r_accum = torch.zeros((b, n), device=z.device)
         count = torch.zeros((b, n), dtype=torch.float32, device=z.device)
 
-        # Sliding window: each window of size m is masked exactly once
-        for start in range(0, n, m):
-            end = min(start + m, n)
-            # Create mask for current window
+        # Interleaved masking: each group masks tokens spaced evenly across the sequence
+        for g in range(num_groups):
             mask = torch.zeros((b, n), dtype=torch.bool, device=z.device)
-            mask[:, start:end] = True
+            mask[:, g::num_groups] = True
 
             # Predict for this mask
             mu, logvar = self.predict(z, mask)
@@ -72,7 +72,7 @@ class ContextExpert(nn.Module):
             r_accum += r * mask
             count += mask
 
-        # Average tokens that were covered multiple times (edge case)
+        # Average (each token is masked exactly once)
         e = e_accum / count.clamp(min=1.0)
         r = r_accum / count.clamp(min=1.0)
         return e, r
