@@ -25,6 +25,7 @@ def parse_args():
     ap.add_argument("--config", type=str, required=True)
     ap.add_argument("--category", type=str, required=True)
     ap.add_argument("--resume_context", type=str, default="")
+    ap.add_argument("--context_scope", type=str, choices=["category", "dataset_shared"], default="category")
     return ap.parse_args()
 
 
@@ -59,6 +60,16 @@ def make_nuisance_views(image: torch.Tensor, num_views: int) -> List[torch.Tenso
             v = torch.roll(v, shifts=shift, dims=3)
         views.append(v)
     return views
+
+
+def resolve_context_checkpoint(cfg, args):
+    if args.resume_context:
+        return Path(args.resume_context), "explicit path"
+
+    if args.context_scope == "category":
+        return Path(cfg["work_dir"]) / args.category / "checkpoints" / "context_last.pt", "category-specific auto path"
+
+    return Path(cfg["work_dir"]) / "_shared_context" / "mvtec" / "checkpoints" / "context_last.pt", "shared auto path"
 
 
 def retrieve_bank(model: RefField, image: torch.Tensor, store: TokenStore, index: ImageIndex, top_r: int, device: torch.device) -> torch.Tensor:
@@ -124,23 +135,23 @@ def main():
         batch = next(iter(train_dl))["image"].to(device)
         model.extract_tokens(batch)
 
-    # Load context checkpoint: explicit path takes priority, otherwise try auto path
-    context_path = args.resume_context
-    if not context_path:
-        auto_path = Path(cfg["work_dir"]) / args.category / "checkpoints" / "context_last.pt"
-        if auto_path.exists():
-            context_path = str(auto_path)
-            print(f"[Gate Training] Auto-loading context checkpoint from: {context_path}")
-        else:
-            print(f"[Gate Training] WARNING: No context checkpoint found at {auto_path}")
-            print(f"[Gate Training] Will train gate WITHOUT pretrained context weights.")
-    else:
-        print(f"[Gate Training] Loading context checkpoint from: {context_path}")
-
-    if context_path:
+    # Load context checkpoint: explicit path takes priority, otherwise use context_scope.
+    context_path, context_source = resolve_context_checkpoint(cfg, args)
+    print(f"[Gate Training] context_scope: {args.context_scope}")
+    if context_path.exists():
+        print(f"[Gate Training] Loading context checkpoint via {context_source}: {context_path}")
         state = torch.load(context_path, map_location="cpu")
         model.load_state_dict(state["model"], strict=False)
         print(f"[Gate Training] Context checkpoint loaded successfully.")
+    else:
+        if context_source == "shared auto path":
+            attempted = "shared context"
+        elif context_source == "category-specific auto path":
+            attempted = "category-specific"
+        else:
+            attempted = "explicit"
+        print(f"[Gate Training] WARNING: No {attempted} context checkpoint found at {context_path}")
+        print(f"[Gate Training] Will train gate WITHOUT pretrained context weights.")
 
     store, index = build_memory(model, mem_dl, device)
 
