@@ -142,19 +142,19 @@ python train_gate.py --config ref_field/configs/mvtec.yaml --category bottle --c
 python infer.py --config ref_field/configs/mvtec.yaml --category bottle --split test --context_scope dataset_shared
 ```
 
-With `context_scope=dataset_shared`, the shared MVTec context checkpoint is saved to and auto-loaded from ``<work_dir>/_shared_context/mvtec/checkpoints/context_last.pt``.
+With `context_scope=dataset_shared`, the shared MVTec context checkpoint is saved to and auto-loaded from ``[work_dir]/_shared_context/mvtec/checkpoints/context_last.pt``.
 
 **Checkpoint auto-loading**:
-- Gate checkpoints are still category-specific. `infer.py` uses `--checkpoint` when provided; otherwise it tries ``<work_dir>/<category>/checkpoints/gate_last.pt``.
-- Context checkpoints are selected by `context_scope`. `context_scope=category` uses ``<work_dir>/<category>/checkpoints/context_last.pt``; `context_scope=dataset_shared` uses ``<work_dir>/_shared_context/mvtec/checkpoints/context_last.pt``.
+- Gate checkpoints are still category-specific. `infer.py` uses `--checkpoint` when provided; otherwise it tries ``[work_dir]/[category]/checkpoints/gate_last.pt``.
+- Context checkpoints are selected by `context_scope`. `context_scope=category` uses ``[work_dir]/[category]/checkpoints/context_last.pt``; `context_scope=dataset_shared` uses ``[work_dir]/_shared_context/mvtec/checkpoints/context_last.pt``.
 - `--resume_context` explicitly overrides the context checkpoint path for `train_gate.py` and `infer.py`. `--checkpoint` explicitly overrides the gate checkpoint path for `infer.py`.
 
 ## Notes
 
 ### Context scope
 
-- `context_scope=category`: trains or loads a category-specific context checkpoint from ``<work_dir>/<category>/checkpoints/context_last.pt``.
-- `context_scope=dataset_shared`: trains or loads one MVTec shared context checkpoint from ``<work_dir>/_shared_context/mvtec/checkpoints/context_last.pt`` across all MVTec categories, which can reduce per-category context overfitting.
+- `context_scope=category`: trains or loads a category-specific context checkpoint from ``[work_dir]/[category]/checkpoints/context_last.pt``.
+- `context_scope=dataset_shared`: trains or loads one MVTec shared context checkpoint from ``[work_dir]/_shared_context/mvtec/checkpoints/context_last.pt`` across all MVTec categories, which can reduce per-category context overfitting.
 
 ### Evaluation protocol
 
@@ -170,7 +170,7 @@ Default config uses a `timm` ViT. If your local `timm` version uses a slightly d
 
 ### Memory building
 
-The first evaluation run builds and caches the normal-image retrieval memory under ``<work_dir>/<category>/memory/``.
+The first evaluation run builds and caches the normal-image retrieval memory under ``[work_dir]/[category]/memory/``.
 
 ### Extending to VisA / Real-IAD
 
