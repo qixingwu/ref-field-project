@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 from tqdm import tqdm
 
 from ref_field.datasets.mvtec import MVTecADDataset
@@ -68,6 +68,7 @@ def parse_args():
     ap.add_argument("--checkpoint", type=str, default="")
     ap.add_argument("--resume_context", type=str, default="")
     ap.add_argument("--context_scope", type=str, choices=["category", "dataset_shared"], default="category")
+    ap.add_argument("--gate_scope", type=str, choices=["category", "dataset_shared"], default="category")
     ap.add_argument("--save_vis", action="store_true")
     return ap.parse_args()
 
@@ -80,6 +81,85 @@ def resolve_context_checkpoint(cfg, args):
         return Path(cfg["work_dir"]) / args.category / "checkpoints" / "context_last.pt", "category-specific auto path"
 
     return Path(cfg["work_dir"]) / "_shared_context" / "mvtec" / "checkpoints" / "context_last.pt", "shared auto path"
+
+
+def discover_mvtec_categories(root):
+    root = Path(root)
+    if not root.exists():
+        raise FileNotFoundError(f"MVTec root does not exist: {root}")
+
+    categories = [
+        p.name
+        for p in sorted(root.iterdir())
+        if p.is_dir() and (p / "train" / "good").is_dir()
+    ]
+    if not categories:
+        raise ValueError(f"No MVTec categories with train/good found under: {root}")
+    return categories
+
+
+def build_mvtec_infer_datasets(cfg, args):
+    if args.gate_scope == "category":
+        train_ds = MVTecADDataset(
+            cfg["data"]["root"],
+            args.category,
+            split="train",
+            image_size=cfg["data"]["image_size"],
+            good_only=True,
+        )
+        test_ds = MVTecADDataset(
+            cfg["data"]["root"],
+            args.category,
+            split=args.split,
+            image_size=cfg["data"]["image_size"],
+            good_only=False,
+        )
+        return train_ds, test_ds, [args.category]
+
+    categories = discover_mvtec_categories(cfg["data"]["root"])
+    train_sets = [
+        MVTecADDataset(
+            cfg["data"]["root"],
+            category,
+            split="train",
+            image_size=cfg["data"]["image_size"],
+            good_only=True,
+        )
+        for category in categories
+    ]
+    test_sets = [
+        MVTecADDataset(
+            cfg["data"]["root"],
+            category,
+            split=args.split,
+            image_size=cfg["data"]["image_size"],
+            good_only=False,
+        )
+        for category in categories
+    ]
+    return ConcatDataset(train_sets), ConcatDataset(test_sets), categories
+
+
+def resolve_gate_checkpoint(cfg, args):
+    if args.checkpoint:
+        return Path(args.checkpoint), "explicit path"
+
+    if args.gate_scope == "category":
+        return Path(cfg["work_dir"]) / args.category / "checkpoints" / "gate_last.pt", "category-specific auto path"
+
+    return Path(cfg["work_dir"]) / "_shared_gate" / "mvtec" / "checkpoints" / "gate_last.pt", "shared auto path"
+
+
+def make_vis_output_path(vis_dir: Path, image_path: Path, data_root: Path, unified: bool) -> Path:
+    subfolder = image_path.parent.name
+    if not unified:
+        return vis_dir / f"{subfolder}_{image_path.stem}.png"
+
+    try:
+        category = image_path.resolve().relative_to(data_root.resolve()).parts[0]
+    except (ValueError, IndexError):
+        category = image_path.parents[2].name if len(image_path.parents) >= 3 else "unknown"
+    return vis_dir / f"{category}_{subfolder}_{image_path.stem}.png"
 
 
 def build_memory(model: RefField, loader: DataLoader, device: torch.device):
@@ -133,8 +213,22 @@ def main():
     set_seed(cfg["seed"])
     device = get_device()
 
-    train_ds = MVTecADDataset(cfg["data"]["root"], args.category, split="train", image_size=cfg["data"]["image_size"], good_only=True)
-    test_ds = MVTecADDataset(cfg["data"]["root"], args.category, split=args.split, image_size=cfg["data"]["image_size"], good_only=False)
+    train_ds, test_ds, categories = build_mvtec_infer_datasets(cfg, args)
+    shared_gate = args.gate_scope == "dataset_shared"
+    if shared_gate:
+        results_dir = Path(cfg["work_dir"]) / "_shared_gate" / "mvtec"
+    else:
+        results_dir = Path(cfg["work_dir"]) / args.category
+    vis_dir = ensure_dir(results_dir / "visualizations")
+    checkpoint_path, checkpoint_source = resolve_gate_checkpoint(cfg, args)
+
+    print(f"[Inference] gate_scope: {args.gate_scope}")
+    print(f"[Inference] context_scope: {args.context_scope}")
+    if shared_gate:
+        print(f"[Inference] --category={args.category} is ignored for dataset_shared gate/data/result scope.")
+        print(f"[Inference] unified MVTec categories ({len(categories)}): {', '.join(categories)}")
+    print(f"[Inference] gate checkpoint path ({checkpoint_source}): {checkpoint_path}")
+    print(f"[Inference] results_dir: {results_dir}")
 
     train_dl = DataLoader(train_ds, batch_size=cfg["data"]["batch_size"], shuffle=False, num_workers=cfg["data"]["num_workers"], pin_memory=True)
     test_dl = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=cfg["data"]["num_workers"], pin_memory=True)
@@ -156,7 +250,6 @@ def main():
 
     # Load context checkpoint: explicit path takes priority, otherwise use context_scope.
     context_path, context_source = resolve_context_checkpoint(cfg, args)
-    print(f"[Inference] context_scope: {args.context_scope}")
     if context_path.exists():
         print(f"[Inference] Loading context checkpoint via {context_source}: {context_path}")
         state = torch.load(context_path, map_location="cpu")
@@ -172,20 +265,12 @@ def main():
         print(f"[Inference] WARNING: No {attempted} context checkpoint found at {context_path}")
         print(f"[Inference] Will run inference with context weights not explicitly restored from a context checkpoint.")
 
-    # Load gate checkpoint: explicit path takes priority, otherwise try auto path
-    checkpoint_path = args.checkpoint
-    if not checkpoint_path:
-        auto_path = Path(cfg["work_dir"]) / args.category / "checkpoints" / "gate_last.pt"
-        if auto_path.exists():
-            checkpoint_path = str(auto_path)
-            print(f"[Inference] Auto-loading gate checkpoint from: {checkpoint_path}")
-        else:
-            raise FileNotFoundError(
-                f"No checkpoint found at {auto_path}. "
-                f"Please train the gate first or specify --checkpoint <path>."
-            )
-    else:
-        print(f"[Inference] Loading gate checkpoint from: {checkpoint_path}")
+    # Load gate checkpoint: explicit path takes priority, otherwise use gate_scope.
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"No checkpoint found at {checkpoint_path}. "
+            f"Please train the gate first or specify --checkpoint <path>."
+        )
 
     state = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(state["model"], strict=False)
@@ -198,8 +283,6 @@ def main():
     image_scores = []
     pixel_masks = []
     pixel_scores = []
-
-    vis_dir = ensure_dir(Path(cfg["work_dir"]) / args.category / "visualizations")
 
     with torch.no_grad():
         for batch in tqdm(test_dl, desc="infer"):
@@ -225,10 +308,8 @@ def main():
 
             if args.save_vis:
                 rgb = denormalize_image(image[0]).permute(1, 2, 0).cpu().numpy()
-                # Include subdirectory name in output filename to avoid overwriting
                 img_path = Path(batch["image_path"][0])
-                subfolder = img_path.parent.name  # e.g., "broken_large", "good", etc.
-                out_path = vis_dir / f"{subfolder}_{img_path.stem}.png"
+                out_path = make_vis_output_path(vis_dir, img_path, Path(cfg["data"]["root"]), shared_gate)
                 save_overlay(rgb, score_np, out_path, gt_mask=mask)
 
     img_metrics = image_level_metrics(image_labels, image_scores)
@@ -250,7 +331,6 @@ def main():
     }
 
     # Save metrics to JSON file with serialization helper
-    results_dir = Path(cfg["work_dir"]) / args.category
     results_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = results_dir / "metrics.json"
     with open(metrics_path, "w") as f:
