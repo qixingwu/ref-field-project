@@ -162,6 +162,88 @@ def make_vis_output_path(vis_dir: Path, image_path: Path, data_root: Path, unifi
     return vis_dir / f"{category}_{subfolder}_{image_path.stem}.png"
 
 
+def build_run_summary(
+    args,
+    summary_metrics: Dict[str, Any],
+    results_dir: Path,
+    metrics_path: Path,
+    context_path: Path,
+    checkpoint_path: Path,
+    context_checkpoint_found: bool,
+    gate_checkpoint_found: bool,
+    num_train_memory_images: int,
+    num_test_images: int,
+) -> Dict[str, Any]:
+    summary = {
+        "mode": args.gate_scope,
+        "category": args.category,
+        "context_scope": args.context_scope,
+        "gate_scope": args.gate_scope,
+        "split": args.split,
+        "num_test_images": num_test_images,
+        "num_train_memory_images": num_train_memory_images,
+        "result_dir": str(results_dir),
+        "metrics_path": str(metrics_path),
+        "context_checkpoint_path": str(context_path),
+        "gate_checkpoint_path": str(checkpoint_path),
+        "context_checkpoint_found": context_checkpoint_found,
+        "gate_checkpoint_found": gate_checkpoint_found,
+    }
+
+    for key in (
+        "image_roc_auc",
+        "image_ap",
+        "pixel_roc_auc",
+        "pixel_ap",
+        "pixel_pro",
+        "pixel_optimal_threshold",
+        "pixel_optimal_fpr",
+        "pixel_optimal_fnr",
+    ):
+        if key in summary_metrics:
+            summary[key] = summary_metrics[key]
+
+    return summary
+
+
+def print_run_summary(summary: Dict[str, Any]) -> None:
+    print("\n" + "="*50)
+    if summary["mode"] == "dataset_shared":
+        print("Unified multi-class inference summary")
+    else:
+        print("Category-specific inference summary")
+    print("="*50)
+    print(f"Mode: {summary['mode']}")
+    print(f"Context scope: {summary['context_scope']}")
+    print(f"Gate scope: {summary['gate_scope']}")
+    print(f"Test images: {summary['num_test_images']}")
+    print(f"Memory images: {summary['num_train_memory_images']}")
+    print(f"Result dir: {summary['result_dir']}")
+    print(f"Context ckpt: {summary['context_checkpoint_path']} (found={summary['context_checkpoint_found']})")
+    print(f"Gate ckpt: {summary['gate_checkpoint_path']} (found={summary['gate_checkpoint_found']})")
+    print("Image-level Metrics:")
+    print(f"  - ROC-AUC: {summary['image_roc_auc']:.4f}")
+    print(f"  - AP:      {summary['image_ap']:.4f}")
+    print("Pixel-level Metrics:")
+    print(f"  - ROC-AUC: {summary['pixel_roc_auc']:.4f}")
+    print(f"  - AP:      {summary['pixel_ap']:.4f}")
+    if "pixel_pro" in summary:
+        print(f"  - PRO:     {summary['pixel_pro']:.4f}")
+
+    if "pixel_optimal_threshold" in summary:
+        th = summary["pixel_optimal_threshold"]
+        fpr = summary.get("pixel_optimal_fpr", float("nan"))
+        fnr = summary.get("pixel_optimal_fnr", float("nan"))
+        print(f"  - Optimal threshold: {th:.4f}")
+        if not np.isnan(fpr):
+            print(f"  - Optimal FPR:       {fpr:.4f}")
+        if not np.isnan(fnr):
+            print(f"  - Optimal FNR:       {fnr:.4f}")
+
+    print("="*50 + "\n")
+    print(f"Metrics saved to: {summary['metrics_path']}")
+
+
 def build_memory(model: RefField, loader: DataLoader, device: torch.device):
     model.eval()
     store = TokenStore()
@@ -221,6 +303,8 @@ def main():
         results_dir = Path(cfg["work_dir"]) / args.category
     vis_dir = ensure_dir(results_dir / "visualizations")
     checkpoint_path, checkpoint_source = resolve_gate_checkpoint(cfg, args)
+    num_train_memory_images = len(train_ds)
+    num_test_images = len(test_ds)
 
     print(f"[Inference] gate_scope: {args.gate_scope}")
     print(f"[Inference] context_scope: {args.context_scope}")
@@ -250,7 +334,8 @@ def main():
 
     # Load context checkpoint: explicit path takes priority, otherwise use context_scope.
     context_path, context_source = resolve_context_checkpoint(cfg, args)
-    if context_path.exists():
+    context_checkpoint_found = context_path.exists()
+    if context_checkpoint_found:
         print(f"[Inference] Loading context checkpoint via {context_source}: {context_path}")
         state = torch.load(context_path, map_location="cpu")
         model.load_state_dict(state["model"], strict=False)
@@ -266,7 +351,8 @@ def main():
         print(f"[Inference] Will run inference with context weights not explicitly restored from a context checkpoint.")
 
     # Load gate checkpoint: explicit path takes priority, otherwise use gate_scope.
-    if not checkpoint_path.exists():
+    gate_checkpoint_found = checkpoint_path.exists()
+    if not gate_checkpoint_found:
         raise FileNotFoundError(
             f"No checkpoint found at {checkpoint_path}. "
             f"Please train the gate first or specify --checkpoint <path>."
@@ -325,43 +411,38 @@ def main():
         "pixel_roc_auc": all_metrics.get("pixel_roc_auc"),
         "pixel_ap": all_metrics.get("pixel_ap"),
         "pixel_pro": all_metrics.get("pixel_pro"),
-        "pixel_optimal_threshold": all_metrics.get("pixel_optimal_threshold"),
-        "pixel_optimal_fpr": all_metrics.get("pixel_optimal_fpr"),
-        "pixel_optimal_fnr": all_metrics.get("pixel_optimal_fnr"),
     }
+    for optional_key in (
+        "pixel_optimal_threshold",
+        "pixel_optimal_fpr",
+        "pixel_optimal_fnr",
+    ):
+        if optional_key in all_metrics:
+            summary_metrics[optional_key] = all_metrics[optional_key]
 
     # Save metrics to JSON file with serialization helper
     results_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = results_dir / "metrics.json"
+    run_summary = build_run_summary(
+        args=args,
+        summary_metrics=summary_metrics,
+        results_dir=results_dir,
+        metrics_path=metrics_path,
+        context_path=context_path,
+        checkpoint_path=checkpoint_path,
+        context_checkpoint_found=context_checkpoint_found,
+        gate_checkpoint_found=gate_checkpoint_found,
+        num_train_memory_images=num_train_memory_images,
+        num_test_images=num_test_images,
+    )
+    metrics_output = {
+        **summary_metrics,
+        "summary": run_summary,
+    }
     with open(metrics_path, "w") as f:
-        json.dump(serialize_for_json(summary_metrics), f, indent=4)
+        json.dump(serialize_for_json(metrics_output), f, indent=4)
 
-    # Print metrics in a more readable format
-    print("\n" + "="*50)
-    print("Anomaly Detection Results")
-    print("="*50)
-    print(f"Image-level Metrics:")
-    print(f"  - ROC-AUC: {img_metrics['image_roc_auc']:.4f}")
-    print(f"  - AP:      {img_metrics['image_ap']:.4f}")
-    print(f"Pixel-level Metrics:")
-    print(f"  - ROC-AUC: {px_metrics['pixel_roc_auc']:.4f}")
-    print(f"  - AP:      {px_metrics['pixel_ap']:.4f}")
-    if 'pixel_pro' in px_metrics:
-        print(f"  - PRO:     {px_metrics['pixel_pro']:.4f}")
-
-    # Print additional pixel-level optimal threshold stats if available
-    if 'pixel_optimal_threshold' in px_metrics:
-        th = px_metrics['pixel_optimal_threshold']
-        fpr = px_metrics.get('pixel_optimal_fpr', float('nan'))
-        fnr = px_metrics.get('pixel_optimal_fnr', float('nan'))
-        print(f"  - Optimal threshold: {th:.4f}")
-        if not np.isnan(fpr):
-            print(f"  - Optimal FPR:       {fpr:.4f}")
-        if not np.isnan(fnr):
-            print(f"  - Optimal FNR:       {fnr:.4f}")
-
-    print("="*50 + "\n")
-    print(f"Metrics saved to: {metrics_path}")
+    print_run_summary(run_summary)
 
 
 if __name__ == "__main__":
