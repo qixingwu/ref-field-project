@@ -125,8 +125,10 @@ This workflow pretrains one context expert on all MVTec categories, then trains 
 ### 1. Shared context pretraining
 
 ```bash
-python train_context.py --config ref_field/configs/mvtec.yaml --context_scope dataset_shared
+python train_context.py --config ref_field/configs/mvtec.yaml --category bottle --context_scope dataset_shared
 ```
+
+In dataset-shared mode, `--category` is accepted for CLI consistency; the shared context is trained across all MVTec categories.
 
 ### 2. Gate training
 
@@ -151,8 +153,8 @@ With `context_scope=dataset_shared`, the shared MVTec context checkpoint is save
 
 ### Context scope
 
-- `context_scope=category`: trains or loads a category-specific context checkpoint.
-- `context_scope=dataset_shared`: trains or loads one MVTec shared context checkpoint across all MVTec categories.
+- `context_scope=category`: trains or loads a category-specific context checkpoint from ``<work_dir>/<category>/checkpoints/context_last.pt``.
+- `context_scope=dataset_shared`: trains or loads one MVTec shared context checkpoint from ``<work_dir>/_shared_context/mvtec/checkpoints/context_last.pt`` across all MVTec categories, which can reduce per-category context overfitting.
 
 ### Evaluation protocol
 
