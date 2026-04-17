@@ -207,6 +207,9 @@ def build_run_summary(
 
 
 def print_run_summary(summary: Dict[str, Any]) -> None:
+    context_ckpt_status = "loaded" if summary["context_checkpoint_found"] else "missing"
+    gate_ckpt_status = "loaded" if summary["gate_checkpoint_found"] else "missing"
+
     print("\n" + "="*50)
     if summary["mode"] == "dataset_shared":
         print("Unified multi-class inference summary")
@@ -214,13 +217,15 @@ def print_run_summary(summary: Dict[str, Any]) -> None:
         print("Category-specific inference summary")
     print("="*50)
     print(f"Mode: {summary['mode']}")
+    print(f"Category: {summary['category']}")
+    print(f"Split: {summary['split']}")
     print(f"Context scope: {summary['context_scope']}")
     print(f"Gate scope: {summary['gate_scope']}")
     print(f"Test images: {summary['num_test_images']}")
     print(f"Memory images: {summary['num_train_memory_images']}")
     print(f"Result dir: {summary['result_dir']}")
-    print(f"Context ckpt: {summary['context_checkpoint_path']} (found={summary['context_checkpoint_found']})")
-    print(f"Gate ckpt: {summary['gate_checkpoint_path']} (found={summary['gate_checkpoint_found']})")
+    print(f"Context ckpt: {summary['context_checkpoint_path']} ({context_ckpt_status})")
+    print(f"Gate ckpt: {summary['gate_checkpoint_path']} ({gate_ckpt_status})")
     print("Image-level Metrics:")
     print(f"  - ROC-AUC: {summary['image_roc_auc']:.4f}")
     print(f"  - AP:      {summary['image_ap']:.4f}")
