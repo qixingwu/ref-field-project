@@ -45,34 +45,67 @@ class ContextExpert(nn.Module):
         nll = ((z - mu) ** 2).sum(dim=-1) / torch.exp(logvar) + logvar
         return nll[mask].mean()
 
+    def _infer_grid_shape(self, n: int) -> tuple[int, int]:
+        """Infer 2D grid shape (H, W) from total token count N."""
+        # Try square root first
+        h = int(round(n ** 0.5))
+        if h > 0 and n % h == 0:
+            return (h, n // h)
+
+        # Search for closest factor pair to sqrt(n)
+        sqrt_n = int(n ** 0.5)
+        for h in range(sqrt_n, 0, -1):
+            if n % h == 0:
+                return (h, n // h)
+
+        # Fallback: should rarely happen for reasonable patch grids
+        return (1, n)
+
     def forward(self, z: torch.Tensor):
-        # Deterministic inference: interleaved masking to avoid spatial block artifacts
+        # Deterministic inference: 2D spatial uniform masking to avoid directional artifacts
         b, n, d = z.shape
 
-        # Number of groups for interleaved masking
+        # Infer 2D grid shape from token count
+        h, w = self._infer_grid_shape(n)
+
+        # Number of groups for spatial masking
         num_groups = max(2, round(1 / self.mask_ratio))
+
+        # Choose (gh, gw) to get roughly num_groups groups, prefer square-ish
+        gh = int(num_groups ** 0.5)
+        gw = (num_groups + gh - 1) // gh  # ceil division
+
+        # Create coordinate grids for 2D indexing
+        rows = torch.arange(h, device=z.device).view(-1, 1).expand(h, w)
+        cols = torch.arange(w, device=z.device).view(1, -1).expand(h, w)
 
         # Initialize accumulators
         e_accum = torch.zeros((b, n), device=z.device)
         r_accum = torch.zeros((b, n), device=z.device)
         count = torch.zeros((b, n), dtype=torch.float32, device=z.device)
 
-        # Interleaved masking: each group masks tokens spaced evenly across the sequence
-        for g in range(num_groups):
-            mask = torch.zeros((b, n), dtype=torch.bool, device=z.device)
-            mask[:, g::num_groups] = True
+        # 2D checkerboard masking: each group masks tokens forming a spatial pattern
+        for i in range(gh):
+            for j in range(gw):
+                # Create 2D mask: select tokens where (row % gh == i) AND (col % gw == j)
+                mask_2d = (rows % gh == i) & (cols % gw == j)
+                mask_flat = mask_2d.view(-1).unsqueeze(0).expand(b, n)
 
-            # Predict for this mask
-            mu, logvar = self.predict(z, mask)
-            e = ((z - mu) ** 2).sum(dim=-1) / torch.exp(logvar) + logvar
-            r = torch.exp(-logvar)
+                # Skip empty masks (can happen when gh * gw > num_groups)
+                if not mask_flat.any():
+                    continue
 
-            # Accumulate only for masked positions
-            e_accum += e * mask
-            r_accum += r * mask
-            count += mask
+                # Predict for this mask
+                mu, logvar = self.predict(z, mask_flat)
+                e = ((z - mu) ** 2).sum(dim=-1) / torch.exp(logvar) + logvar
+                r = torch.exp(-logvar)
 
-        # Average (each token is masked exactly once)
+                # Accumulate only for masked positions
+                e_accum += e * mask_flat
+                r_accum += r * mask_flat
+                count += mask_flat
+
+        # Average (each token is masked exactly once in ideal case)
         e = e_accum / count.clamp(min=1.0)
         r = r_accum / count.clamp(min=1.0)
         return e, r
