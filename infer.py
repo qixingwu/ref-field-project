@@ -168,7 +168,9 @@ def build_run_summary(
     results_dir: Path,
     metrics_path: Path,
     context_path: Path,
+    context_source: str,
     checkpoint_path: Path,
+    checkpoint_source: str,
     context_checkpoint_found: bool,
     gate_checkpoint_found: bool,
     num_train_memory_images: int,
@@ -185,7 +187,9 @@ def build_run_summary(
         "result_dir": str(results_dir),
         "metrics_path": str(metrics_path),
         "context_checkpoint_path": str(context_path),
+        "context_checkpoint_source": context_source,
         "gate_checkpoint_path": str(checkpoint_path),
+        "gate_checkpoint_source": checkpoint_source,
         "context_checkpoint_found": context_checkpoint_found,
         "gate_checkpoint_found": gate_checkpoint_found,
     }
@@ -209,6 +213,8 @@ def build_run_summary(
 def print_run_summary(summary: Dict[str, Any]) -> None:
     context_ckpt_status = "loaded" if summary["context_checkpoint_found"] else "missing"
     gate_ckpt_status = "loaded" if summary["gate_checkpoint_found"] else "missing"
+    context_ckpt_source = summary.get("context_checkpoint_source", "unknown source")
+    gate_ckpt_source = summary.get("gate_checkpoint_source", "unknown source")
 
     print("\n" + "="*50)
     if summary["mode"] == "dataset_shared":
@@ -224,8 +230,8 @@ def print_run_summary(summary: Dict[str, Any]) -> None:
     print(f"Test images: {summary['num_test_images']}")
     print(f"Memory images: {summary['num_train_memory_images']}")
     print(f"Result dir: {summary['result_dir']}")
-    print(f"Context ckpt: {summary['context_checkpoint_path']} ({context_ckpt_status})")
-    print(f"Gate ckpt: {summary['gate_checkpoint_path']} ({gate_ckpt_status})")
+    print(f"Context ckpt: {summary['context_checkpoint_path']} ({context_ckpt_status}, {context_ckpt_source})")
+    print(f"Gate ckpt: {summary['gate_checkpoint_path']} ({gate_ckpt_status}, {gate_ckpt_source})")
     print("Image-level Metrics:")
     print(f"  - ROC-AUC: {summary['image_roc_auc']:.4f}")
     print(f"  - AP:      {summary['image_ap']:.4f}")
@@ -434,7 +440,9 @@ def main():
         results_dir=results_dir,
         metrics_path=metrics_path,
         context_path=context_path,
+        context_source=context_source,
         checkpoint_path=checkpoint_path,
+        checkpoint_source=checkpoint_source,
         context_checkpoint_found=context_checkpoint_found,
         gate_checkpoint_found=gate_checkpoint_found,
         num_train_memory_images=num_train_memory_images,
