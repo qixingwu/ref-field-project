@@ -66,8 +66,20 @@ def parse_args():
     ap.add_argument("--category", type=str, required=True)
     ap.add_argument("--split", type=str, default="test")
     ap.add_argument("--checkpoint", type=str, default="")
+    ap.add_argument("--resume_context", type=str, default="")
+    ap.add_argument("--context_scope", type=str, choices=["category", "dataset_shared"], default="category")
     ap.add_argument("--save_vis", action="store_true")
     return ap.parse_args()
+
+
+def resolve_context_checkpoint(cfg, args):
+    if args.resume_context:
+        return Path(args.resume_context), "explicit path"
+
+    if args.context_scope == "category":
+        return Path(cfg["work_dir"]) / args.category / "checkpoints" / "context_last.pt", "category-specific auto path"
+
+    return Path(cfg["work_dir"]) / "_shared_context" / "mvtec" / "checkpoints" / "context_last.pt", "shared auto path"
 
 
 def build_memory(model: RefField, loader: DataLoader, device: torch.device):
@@ -141,6 +153,24 @@ def main():
     with torch.no_grad():
         batch = next(iter(train_dl))["image"].to(device)
         model.extract_tokens(batch)
+
+    # Load context checkpoint: explicit path takes priority, otherwise use context_scope.
+    context_path, context_source = resolve_context_checkpoint(cfg, args)
+    print(f"[Inference] context_scope: {args.context_scope}")
+    if context_path.exists():
+        print(f"[Inference] Loading context checkpoint via {context_source}: {context_path}")
+        state = torch.load(context_path, map_location="cpu")
+        model.load_state_dict(state["model"], strict=False)
+        print(f"[Inference] Context checkpoint loaded successfully.")
+    else:
+        if context_source == "shared auto path":
+            attempted = "shared context"
+        elif context_source == "category-specific auto path":
+            attempted = "category-specific"
+        else:
+            attempted = "explicit"
+        print(f"[Inference] WARNING: No {attempted} context checkpoint found at {context_path}")
+        print(f"[Inference] Will run inference with context weights not explicitly restored from a context checkpoint.")
 
     # Load gate checkpoint: explicit path takes priority, otherwise try auto path
     checkpoint_path = args.checkpoint
