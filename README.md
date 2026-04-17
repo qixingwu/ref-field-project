@@ -98,6 +98,8 @@ mvtec_ad/
 
 ## Quick start
 
+This is the category-specific context workflow. It remains supported for compatibility and for per-category experiments. The repository also supports MVTec dataset-shared context pretraining; see the next section for the recommended workflow when you want to reduce per-category context overfitting.
+
 ### 1. Context pretraining
 
 ```bash
@@ -116,9 +118,41 @@ python train_gate.py --config ref_field/configs/mvtec.yaml --category bottle
 python infer.py --config ref_field/configs/mvtec.yaml --category bottle --split test
 ```
 
-**Checkpoint auto-loading**: The scripts automatically find checkpoints at `<work_dir>/<category>/checkpoints/`. You can still manually specify `--resume_context` or `--checkpoint` to override.
+## Recommended MVTec workflow: dataset-shared context
+
+This workflow pretrains one context expert on all MVTec categories, then trains and evaluates the gate per category. It is recommended when you want the context branch to rely less on category-specific reconstruction shortcuts.
+
+### 1. Shared context pretraining
+
+```bash
+python train_context.py --config ref_field/configs/mvtec.yaml --context_scope dataset_shared
+```
+
+### 2. Gate training
+
+```bash
+python train_gate.py --config ref_field/configs/mvtec.yaml --category bottle --context_scope dataset_shared
+```
+
+### 3. Inference / evaluation
+
+```bash
+python infer.py --config ref_field/configs/mvtec.yaml --category bottle --split test --context_scope dataset_shared
+```
+
+With `context_scope=dataset_shared`, the shared MVTec context checkpoint is saved to and auto-loaded from `<work_dir>/_shared_context/mvtec/checkpoints/context_last.pt`.
+
+**Checkpoint auto-loading**:
+- Gate checkpoints are still category-specific. `infer.py` uses `--checkpoint` when provided; otherwise it tries `<work_dir>/<category>/checkpoints/gate_last.pt`.
+- Context checkpoints are selected by `context_scope`. `context_scope=category` uses `<work_dir>/<category>/checkpoints/context_last.pt`; `context_scope=dataset_shared` uses `<work_dir>/_shared_context/mvtec/checkpoints/context_last.pt`.
+- `--resume_context` explicitly overrides the context checkpoint path for `train_gate.py` and `infer.py`. `--checkpoint` explicitly overrides the gate checkpoint path for `infer.py`.
 
 ## Notes
+
+### Context scope
+
+- `context_scope=category`: trains or loads a category-specific context checkpoint.
+- `context_scope=dataset_shared`: trains or loads one MVTec shared context checkpoint across all MVTec categories.
 
 ### Evaluation protocol
 
@@ -148,6 +182,8 @@ The first evaluation run builds and caches the normal-image retrieval memory und
 2. External + Intra
 3. External + Intra + Gate
 4. Full model with context expert
+
+For context-branch ablations, compare `context_scope=category` against `context_scope=dataset_shared`.
 
 ## Citation
 
