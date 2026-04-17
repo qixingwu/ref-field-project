@@ -144,17 +144,54 @@ python infer.py --config ref_field/configs/mvtec.yaml --category bottle --split 
 
 With `context_scope=dataset_shared`, the shared MVTec context checkpoint is saved to and auto-loaded from ``[work_dir]/_shared_context/mvtec/checkpoints/context_last.pt``.
 
+## Recommended unified multi-class workflow on MVTec
+
+This workflow pretrains one MVTec shared context expert, then trains and evaluates one unified gate across all MVTec categories.
+
+### 1. Shared context pretraining
+
+```bash
+python train_context.py --config ref_field/configs/mvtec.yaml --category bottle --context_scope dataset_shared
+```
+
+`--category` is kept only for CLI compatibility in dataset-shared mode.
+
+### 2. Unified multi-class gate training
+
+```bash
+python train_gate.py --config ref_field/configs/mvtec.yaml --category bottle --context_scope dataset_shared --gate_scope dataset_shared
+```
+
+### 3. Unified multi-class inference / evaluation
+
+```bash
+python infer.py --config ref_field/configs/mvtec.yaml --category bottle --split test --context_scope dataset_shared --gate_scope dataset_shared
+```
+
+### 4. Unified multi-class benchmark
+
+```bash
+python benchmark.py --config ref_field/configs/mvtec.yaml --context_scope dataset_shared --gate_scope dataset_shared
+```
+
+With `gate_scope=dataset_shared`, inference and benchmark results are written under ``[work_dir]/_shared_gate/mvtec`` instead of a single category directory. Metrics are saved to ``[work_dir]/_shared_gate/mvtec/metrics.json`` and visualizations, when enabled, are saved under ``[work_dir]/_shared_gate/mvtec/visualizations/``.
+
 **Checkpoint auto-loading**:
-- Gate checkpoints are still category-specific. `infer.py` uses `--checkpoint` when provided; otherwise it tries ``[work_dir]/[category]/checkpoints/gate_last.pt``.
 - Context checkpoints are selected by `context_scope`. `context_scope=category` uses ``[work_dir]/[category]/checkpoints/context_last.pt``; `context_scope=dataset_shared` uses ``[work_dir]/_shared_context/mvtec/checkpoints/context_last.pt``.
-- `--resume_context` explicitly overrides the context checkpoint path for `train_gate.py` and `infer.py`. `--checkpoint` explicitly overrides the gate checkpoint path for `infer.py`.
+- Gate checkpoints are selected by `gate_scope`. `gate_scope=category` uses ``[work_dir]/[category]/checkpoints/gate_last.pt``; `gate_scope=dataset_shared` uses ``[work_dir]/_shared_gate/mvtec/checkpoints/gate_last.pt``.
+- `--resume_context` explicitly overrides the context checkpoint path for `train_gate.py` and `infer.py`. `--checkpoint` explicitly overrides the gate checkpoint path for `infer.py` and `benchmark.py`.
 
 ## Notes
 
-### Context scope
+### Context and gate scope
 
-- `context_scope=category`: trains or loads a category-specific context checkpoint from ``[work_dir]/[category]/checkpoints/context_last.pt``.
-- `context_scope=dataset_shared`: trains or loads one MVTec shared context checkpoint from ``[work_dir]/_shared_context/mvtec/checkpoints/context_last.pt`` across all MVTec categories, which can reduce per-category context overfitting.
+- `context_scope` decides where context checkpoints are trained or loaded from: `category` or `dataset_shared`.
+- `gate_scope` decides the data and result scope for gate training, inference, and benchmark: `category` or `dataset_shared`.
+- Do not mix them up: shared context can be used with either category-specific gate training or unified multi-class gate training.
+- `context_scope=category`: uses ``[work_dir]/[category]/checkpoints/context_last.pt``.
+- `context_scope=dataset_shared`: uses ``[work_dir]/_shared_context/mvtec/checkpoints/context_last.pt``.
+- `gate_scope=category`: uses ``[work_dir]/[category]/checkpoints/gate_last.pt`` and writes inference results under ``[work_dir]/[category]``.
+- `gate_scope=dataset_shared`: uses ``[work_dir]/_shared_gate/mvtec/checkpoints/gate_last.pt`` and writes unified inference / benchmark results under ``[work_dir]/_shared_gate/mvtec``.
 
 ### Evaluation protocol
 
@@ -186,6 +223,8 @@ The first evaluation run builds and caches the normal-image retrieval memory und
 4. Full model with context expert
 
 For context-branch ablations, compare `context_scope=category` against `context_scope=dataset_shared`.
+
+For gate ablations, compare category-specific `gate_scope=category` against unified multi-class `gate_scope=dataset_shared`.
 
 ## Citation
 
