@@ -39,10 +39,12 @@ def load_metrics_json(path: Path) -> Dict[str, Any] | None:
     return None
 
 
-def metric_value(metrics: Dict[str, Any], key: str) -> float:
+def metric_value(metrics: Dict[str, Any], key: str, prefer_top_level: bool = False) -> float:
     summary = metrics.get("summary")
     value = None
-    if isinstance(summary, dict):
+    if prefer_top_level and metrics.get(key) is not None:
+        value = metrics.get(key)
+    elif isinstance(summary, dict):
         value = summary.get(key)
     if value is None:
         value = metrics.get(key)
@@ -62,8 +64,8 @@ def summary_value(metrics: Dict[str, Any], key: str, default: Any = "nan") -> An
     return default
 
 
-def extract_primary_metrics(metrics: Dict[str, Any]) -> Dict[str, float]:
-    return {key: metric_value(metrics, key) for key in PRIMARY_METRICS}
+def extract_primary_metrics(metrics: Dict[str, Any], prefer_top_level: bool = False) -> Dict[str, float]:
+    return {key: metric_value(metrics, key, prefer_top_level=prefer_top_level) for key in PRIMARY_METRICS}
 
 
 def format_metric(value: float) -> str:
@@ -108,8 +110,19 @@ def print_category_table(rows: List[Dict[str, Any]]) -> None:
     print("-" * 78)
 
 
+def print_metric_row(name: str, metrics: Dict[str, float]) -> None:
+    print(
+        f"{name:<14} "
+        f"{format_metric(metrics['image_roc_auc']):>10} "
+        f"{format_metric(metrics['image_ap']):>10} "
+        f"{format_metric(metrics['pixel_roc_auc']):>10} "
+        f"{format_metric(metrics['pixel_ap']):>10} "
+        f"{format_metric(metrics['pixel_pro']):>10}"
+    )
+
+
 def print_unified_summary(metrics: Dict[str, Any]) -> None:
-    primary = extract_primary_metrics(metrics)
+    primary = extract_primary_metrics(metrics, prefer_top_level=True)
 
     print("\nUnified multi-class benchmark summary")
     print("-" * 50)
@@ -118,6 +131,7 @@ def print_unified_summary(metrics: Dict[str, Any]) -> None:
     print(f"Gate scope: {summary_value(metrics, 'gate_scope')}")
     print(f"Test images: {summary_value(metrics, 'num_test_images')}")
     print(f"Memory images: {summary_value(metrics, 'num_train_memory_images')}")
+    print("\nUnified overall metrics")
     print(f"Image ROC-AUC: {format_metric(primary['image_roc_auc'])}")
     print(f"Image AP:      {format_metric(primary['image_ap'])}")
     print(f"Pixel ROC-AUC: {format_metric(primary['pixel_roc_auc'])}")
@@ -125,6 +139,42 @@ def print_unified_summary(metrics: Dict[str, Any]) -> None:
     print(f"Pixel PRO:     {format_metric(primary['pixel_pro'])}")
     print(f"Result dir: {summary_value(metrics, 'result_dir')}")
     print("-" * 50)
+
+
+def print_unified_per_category_table(per_category: Any) -> None:
+    if not isinstance(per_category, dict):
+        print("WARNING: unified per-category breakdown not found")
+        return
+
+    print("\nUnified per-category metrics")
+    print("-" * 78)
+    print(f"{'Category':<14} {'I-ROC':>10} {'I-AP':>10} {'P-ROC':>10} {'P-AP':>10} {'PRO':>10}")
+    print("-" * 78)
+    for category in sorted(per_category):
+        category_metrics = per_category[category]
+        if not isinstance(category_metrics, dict):
+            category_metrics = {}
+        print_metric_row(category, extract_primary_metrics(category_metrics))
+    print("-" * 78)
+
+
+def print_unified_mean_over_categories(metrics: Dict[str, Any]) -> None:
+    summary = metrics.get("summary")
+    mean_metrics = None
+    if isinstance(summary, dict):
+        mean_metrics = summary.get("mean_over_categories")
+    if not isinstance(mean_metrics, dict):
+        print("WARNING: unified mean_over_categories not found")
+        return
+
+    primary = extract_primary_metrics(mean_metrics)
+    print("\nMean over categories")
+    print("(simple mean of per-category metrics; not the same as unified overall metrics)")
+    print("-" * 78)
+    print(f"{'Metric set':<14} {'I-ROC':>10} {'I-AP':>10} {'P-ROC':>10} {'P-AP':>10} {'PRO':>10}")
+    print("-" * 78)
+    print_metric_row("Mean", primary)
+    print("-" * 78)
 
 
 def main():
@@ -170,6 +220,8 @@ def main():
         metrics = load_metrics_json(metrics_path)
         if metrics is not None:
             print_unified_summary(metrics)
+            print_unified_per_category_table(metrics.get("per_category"))
+            print_unified_mean_over_categories(metrics)
         return
 
     print("benchmark will iterate over all MVTec categories")
