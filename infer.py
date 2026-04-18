@@ -155,11 +155,48 @@ def make_vis_output_path(vis_dir: Path, image_path: Path, data_root: Path, unifi
     if not unified:
         return vis_dir / f"{subfolder}_{image_path.stem}.png"
 
-    try:
-        category = image_path.resolve().relative_to(data_root.resolve()).parts[0]
-    except (ValueError, IndexError):
-        category = image_path.parents[2].name if len(image_path.parents) >= 3 else "unknown"
+    category = infer_category_from_image_path(image_path, data_root)
     return vis_dir / f"{category}_{subfolder}_{image_path.stem}.png"
+
+
+def infer_category_from_image_path(image_path: Path, data_root: Path) -> str:
+    try:
+        return image_path.resolve().relative_to(data_root.resolve()).parts[0]
+    except (ValueError, IndexError):
+        return image_path.parents[2].name if len(image_path.parents) >= 3 else "unknown"
+
+
+def extract_summary_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    summary = {
+        "image_roc_auc": metrics.get("image_roc_auc"),
+        "image_ap": metrics.get("image_ap"),
+        "pixel_roc_auc": metrics.get("pixel_roc_auc"),
+        "pixel_ap": metrics.get("pixel_ap"),
+        "pixel_pro": metrics.get("pixel_pro"),
+    }
+    for optional_key in (
+        "pixel_optimal_threshold",
+        "pixel_optimal_fpr",
+        "pixel_optimal_fnr",
+    ):
+        if optional_key in metrics:
+            summary[optional_key] = metrics[optional_key]
+    return summary
+
+
+def nanmean_metric_dicts(metric_dicts: List[Dict[str, Any]], keys: List[str]) -> Dict[str, float]:
+    means = {}
+    for key in keys:
+        values = []
+        for metrics in metric_dicts:
+            value = metrics.get(key)
+            if value is None:
+                continue
+            value = float(value)
+            if not np.isnan(value):
+                values.append(value)
+        means[key] = float(np.mean(values)) if values else float("nan")
+    return means
 
 
 def build_run_summary(
@@ -250,6 +287,16 @@ def print_run_summary(summary: Dict[str, Any]) -> None:
             print(f"  - Optimal FPR:       {fpr:.4f}")
         if not np.isnan(fnr):
             print(f"  - Optimal FNR:       {fnr:.4f}")
+
+    if summary["mode"] == "dataset_shared" and "mean_over_categories" in summary:
+        mean_metrics = summary["mean_over_categories"]
+        print("Per-category mean metrics:")
+        print(f"  - Image ROC-AUC: {mean_metrics['image_roc_auc']:.4f}")
+        print(f"  - Image AP:      {mean_metrics['image_ap']:.4f}")
+        print(f"  - Pixel ROC-AUC: {mean_metrics['pixel_roc_auc']:.4f}")
+        print(f"  - Pixel AP:      {mean_metrics['pixel_ap']:.4f}")
+        print(f"  - Pixel PRO:     {mean_metrics['pixel_pro']:.4f}")
+        print("Per-category breakdown saved in metrics.json")
 
     print("="*50 + "\n")
     print(f"Metrics saved to: {summary['metrics_path']}")
@@ -380,6 +427,7 @@ def main():
     image_scores = []
     pixel_masks = []
     pixel_scores = []
+    per_category_data = {}
 
     with torch.no_grad():
         for batch in tqdm(test_dl, desc="infer"):
@@ -403,6 +451,23 @@ def main():
             pixel_masks.append(mask)
             pixel_scores.append(score_np)
 
+            if shared_gate:
+                img_path = Path(batch["image_path"][0])
+                category = infer_category_from_image_path(img_path, Path(cfg["data"]["root"]))
+                category_data = per_category_data.setdefault(
+                    category,
+                    {
+                        "image_labels": [],
+                        "image_scores": [],
+                        "pixel_masks": [],
+                        "pixel_scores": [],
+                    },
+                )
+                category_data["image_labels"].append(label)
+                category_data["image_scores"].append(img_score)
+                category_data["pixel_masks"].append(mask)
+                category_data["pixel_scores"].append(score_np)
+
             if args.save_vis:
                 rgb = denormalize_image(image[0]).permute(1, 2, 0).cpu().numpy()
                 img_path = Path(batch["image_path"][0])
@@ -416,20 +481,25 @@ def main():
     all_metrics = {**img_metrics, **px_metrics}
 
     # Filter to only keep summary metrics (exclude large arrays like fpr, tpr, precision, recall)
-    summary_metrics = {
-        "image_roc_auc": all_metrics.get("image_roc_auc"),
-        "image_ap": all_metrics.get("image_ap"),
-        "pixel_roc_auc": all_metrics.get("pixel_roc_auc"),
-        "pixel_ap": all_metrics.get("pixel_ap"),
-        "pixel_pro": all_metrics.get("pixel_pro"),
-    }
-    for optional_key in (
-        "pixel_optimal_threshold",
-        "pixel_optimal_fpr",
-        "pixel_optimal_fnr",
-    ):
-        if optional_key in all_metrics:
-            summary_metrics[optional_key] = all_metrics[optional_key]
+    summary_metrics = extract_summary_metrics(all_metrics)
+
+    per_category_metrics = {}
+    mean_over_categories = {}
+    if shared_gate:
+        for category in sorted(per_category_data):
+            category_data = per_category_data[category]
+            category_img_metrics = image_level_metrics(category_data["image_labels"], category_data["image_scores"])
+            category_px_metrics = pixel_level_metrics(category_data["pixel_masks"], category_data["pixel_scores"])
+            per_category_metrics[category] = extract_summary_metrics({**category_img_metrics, **category_px_metrics})
+
+        main_metric_keys = [
+            "image_roc_auc",
+            "image_ap",
+            "pixel_roc_auc",
+            "pixel_ap",
+            "pixel_pro",
+        ]
+        mean_over_categories = nanmean_metric_dicts(list(per_category_metrics.values()), main_metric_keys)
 
     # Save metrics to JSON file with serialization helper
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -448,10 +518,18 @@ def main():
         num_train_memory_images=num_train_memory_images,
         num_test_images=num_test_images,
     )
+    if shared_gate:
+        run_summary["num_categories"] = len(per_category_metrics)
+        run_summary["category_names"] = sorted(per_category_metrics)
+        run_summary["mean_over_categories"] = mean_over_categories
+
     metrics_output = {
         **summary_metrics,
         "summary": run_summary,
     }
+    if shared_gate:
+        metrics_output["per_category"] = per_category_metrics
+
     with open(metrics_path, "w") as f:
         json.dump(serialize_for_json(metrics_output), f, indent=4)
 
