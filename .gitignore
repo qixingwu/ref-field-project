@@ -36,9 +36,9 @@ wandb/
 runs/
 
 # Data
-data/
-datasets/
-mvtec_ad/
+/data/
+/datasets/
+/mvtec_ad/
 
 # Outputs
 work_dirs/
